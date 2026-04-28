@@ -84,6 +84,28 @@ curl -fsSL https://get.synapcores.com | SYNAPCORES_VERSION=v1.0.0 sh
    # synapcores 0.1.0 Community (build 275, abc1234)
    ```
 
+6. **Capture the first-boot admin password.** It's printed exactly
+   once to the gateway logs and never shown again:
+
+   ```bash
+   sudo journalctl -u synapcores -n 200 --no-pager | grep -A 7 "FIRST-BOOT"
+   ```
+
+   Save the password somewhere safe — you'll need it for first
+   login.
+
+7. **Open the Web UI.** Point a browser at the gateway's HTTP port:
+
+   ```
+   http://<your-host>:8080/
+   ```
+
+   Or `https://<your-host>:8443/` if you enabled TLS in step 2. Log
+   in as `admin` with the password you just captured. Change it
+   immediately under **Settings → Account**.
+
+   See [Web UI](web-ui.md) for the full feature tour.
+
 ## Docker
 
 ```bash

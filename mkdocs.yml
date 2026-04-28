@@ -73,6 +73,7 @@ nav:
       - Quickstart: quickstart.md
       - Hardware requirements: requirements.md
       - First-run AI setup: ai-setup.md
+      - Web UI: web-ui.md
   - Reference:
       - Limits & quotas: limits.md
       - Community vs Enterprise: enterprise.md

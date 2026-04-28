@@ -40,6 +40,11 @@ for the full walkthrough.
     Wire up a local GGUF, Ollama, or external provider for AI Chat
     and NL2SQL.
 
+- :material-monitor-dashboard:{ .lg .middle } **[Web UI](web-ui.md)**
+
+    The bundled React UI on `:8080` — dashboard, query editor,
+    AI chat, vector search, recipes, graph explorer.
+
 - :material-account-group:{ .lg .middle } **[Community vs Enterprise](enterprise.md)**
 
     What's in CE, what's gated to EE, and how to upgrade.
