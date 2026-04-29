@@ -5,6 +5,24 @@ Community Edition. For the CE/EE feature boundary, see
 [Community vs Enterprise](enterprise.md). For sizing, see
 [Hardware requirements](requirements.md).
 
+!!! warning "Supported distros"
+
+    The bare-metal install path supports **Ubuntu 22.04 LTS** and
+    **Debian 12 (Bookworm)** today. Ubuntu 24.04, Debian 13, and
+    older distros (Ubuntu 20.04, RHEL 8, CentOS 7, etc.) are NOT
+    yet supported by the dynamically-linked CE binary — see the full
+    matrix in [Hardware requirements](requirements.md#supported-linux-distributions).
+
+    On unsupported distros, use **Docker** instead (works everywhere):
+
+    ```bash
+    docker run -p 8080:8080 -v synapcores-data:/var/lib/synapcores \
+               -e AIDB_JWT_SECRET="$(openssl rand -base64 32)" \
+               ghcr.io/synapcores/community:latest
+    ```
+
+    Multi-distro builds are tracked for v1.2.1-ce.
+
 ## Install on Linux
 
 ```bash
