@@ -77,5 +77,6 @@ nav:
       - Run on macOS: macos.md
   - Reference:
       - Limits & quotas: limits.md
+      - Filesystem Collections: filesystem-rag.md
       - Community vs Enterprise: enterprise.md
   - Support: support.md

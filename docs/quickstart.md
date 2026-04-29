@@ -106,6 +106,11 @@ curl -fsSL https://get.synapcores.com | SYNAPCORES_VERSION=v1.0.0 sh
 
    See [Web UI](web-ui.md) for the full feature tour.
 
+8. **Try Filesystem Collections.** Point a folder at the gateway and
+   watch CSVs, PDFs, images, and audio get ingested and indexed
+   automatically. See [Filesystem Collections](filesystem-rag.md) for
+   the walkthrough.
+
 ## Docker
 
 ```bash
