@@ -1,14 +1,12 @@
 # Filesystem Collections
 
-!!! info "v1.2.0-ce preview"
-    This feature is in the **v1.2.0-ce** release. If you're on an earlier
-    version, upgrade with:
+!!! info "Available in v1.2.0+"
+    This feature is available in **v1.2.0** and later. If you're on an
+    earlier version, upgrade with:
 
     ```bash
     curl -fsSL https://get.synapcores.com/install.sh | sh
     ```
-
-    Screenshots of the Web UI surface are coming with the v1.2.0 release.
 
 A **Filesystem Collection** is a folder on disk that the gateway watches.
 Drop a file in, and SynapCores ingests it: CSVs become SQL tables, PDFs
@@ -322,7 +320,7 @@ returns a `400 Bad Request`. If the folder gets deleted out from under
 a live collection, the next scan logs a clear error and the collection
 moves to `failed` state until the path is restored.
 
-## What's not supported in v1.2.0-ce
+## What's not supported in Community Edition
 
 - **Cloud storage watching** (S3, GCS, Azure Blob) — Enterprise feature.
 - **Cross-tenant collections** — collections are strictly tenant-scoped;
