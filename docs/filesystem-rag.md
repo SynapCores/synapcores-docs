@@ -142,6 +142,32 @@ ORDER  BY total DESC;
 If you want the full join syntax across collections, the table is
 addressable as `my_docs.sales` too.
 
+#### Large CSV files (streaming mode)
+
+CSV files with more than **10 000 rows** are processed in
+**streaming mode**: the processor reads the file in 1 000-row batches,
+infers the column schema from the first 1 000 rows, then refines it as
+later batches arrive (always widening — never tightening — the inferred
+type). This caps peak memory regardless of file size: a 100 MB / 1 M-row
+CSV ingests in well under 200 MB of RSS, where the previous fully-
+buffered code path would OOM the gateway.
+
+Progress for streaming CSVs is reported per-batch on the same WebSocket
+progress feed used by the rest of the pipeline (see the
+[`/v1/filesystem-collections/:id/progress`](#websocket-progress-stream)
+endpoint). Each batch event carries the running row count and elapsed
+milliseconds so the UI can show a live `42 000 / 1 000 000 rows` indicator
+during a long ingest.
+
+Tunables:
+
+* `chunk_size` (per-collection, see below) — only affects the **text
+  preview** generated from the first ~200 CSV rows for full-text RAG.
+  It does **not** affect the SQL ingest path or the streaming threshold.
+* The streaming threshold itself is currently a fixed gateway default
+  (10 000 rows). On-the-fly tuning via `WITH (...)` options is on the
+  v1.3 roadmap.
+
 ### Image search
 
 ```sql
@@ -212,6 +238,46 @@ tenant-scoped automatically.
 | `PATCH` | `/v1/filesystem-collections/:id` | Pause / resume — body `{"paused": true}` or `{"paused": false}`. |
 | `DELETE` | `/v1/filesystem-collections/:id` | Delete. Optional query string `?retain_data=true` keeps the ingested rows / vectors. |
 | `GET` | `/v1/filesystem-collections/:id/documents` | List ingested files with status, size, and last-processed timestamp. |
+| `GET` | `/v1/filesystem-collections/:id/documents/:doc_id/file` | Download the original file binary. Append `?thumbnail=true` for a 256x256 JPEG preview. Streams the response and supports HTTP range requests for video. |
+| `POST` | `/v1/filesystem-collections/:id/documents/:doc_id/reprocess` | Re-queue one document for ingest. Returns `202 Accepted` with the enqueue timestamp. Idempotent: repeated clicks while the doc is still pending are deduped. |
+
+#### Fetching file binaries
+
+The file endpoint streams the original bytes back with the appropriate
+`Content-Type` (PNG, MP4, PDF, …). HTTP range requests are honored — every
+full-file response sets `Accept-Ranges: bytes`, and clients can issue
+`Range: bytes=N-M` to seek without re-downloading earlier bytes. HTML5
+`<video>` does this automatically for scrubbing.
+
+```bash
+# Full file
+curl -O -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8080/v1/filesystem-collections/$CID/documents/$DOC_ID/file"
+
+# 256x256 JPEG thumbnail (browser-cacheable for an hour)
+curl -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8080/v1/filesystem-collections/$CID/documents/$DOC_ID/file?thumbnail=true" \
+     -o thumb.jpg
+
+# Range request — first 1 MB only (HTML5 video does this implicitly)
+curl -H "Authorization: Bearer $TOKEN" \
+     -H "Range: bytes=0-1048575" \
+     "http://localhost:8080/v1/filesystem-collections/$CID/documents/$DOC_ID/file" \
+     -o head.bin
+```
+
+Thumbnails are generated on demand: images and PDFs render to JPEG via the
+in-process decoders, videos extract a frame at 1.0s via FFmpeg when
+present, and audio / SVG / unknown formats fall back to a generic SVG icon.
+Thumbnail responses ship with `Cache-Control: private, max-age=3600`;
+full-file responses use `no-cache` because the watcher may have re-ingested
+the file between requests.
+
+If the source file was deleted from disk after ingest, the endpoint returns
+`410 Gone` with a "file removed from disk; re-process to update" message —
+trigger the reprocess endpoint above to clean up. Cross-tenant requests
+collapse to `404 Not Found`. Malformed `Range` headers return
+`416 Range Not Satisfiable`.
 
 Example — create from curl:
 
@@ -312,6 +378,22 @@ If the download fails, the gateway logs a clear error and the file
 stays in `pending` state — no data loss, just retry once connectivity
 is back. To force a retry without waiting for the next OS event,
 pause and resume the collection.
+
+### "A single document failed — how do I retry it?"
+
+If a document fails to ingest (transient OCR error, network blip
+during a Hugging Face model download, encoder crash on a corrupt
+video), click **Re-process** in the document grid (UI) or
+`POST /v1/filesystem-collections/:id/documents/:doc_id/reprocess`
+(API). Recovery is at-most-once per click; the orchestrator dedupes
+if the doc is still queued, so a double-click does not create
+duplicate work. The doc transitions back to `pending` immediately
+and to `indexed` once a worker drains it. You can re-process a
+document in any state (`pending` / `processing` / `indexed` /
+`failed`); this is also the right tool to re-embed a single file
+after changing the embedding model. If the underlying source file
+has been deleted from disk, the API returns `410 Gone` — delete the
+document record instead.
 
 ### "Watched folder must exist when collection is created"
 
