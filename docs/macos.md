@@ -1,99 +1,111 @@
 # Run on macOS
 
-CE v1.0 ships **Linux binaries only**. macOS native binaries are
-deferred to v1.1 (the multimedia subsystem needs to migrate to the
-FFmpeg 5+ API before the macOS build is unblocked — tracked separately).
+Starting with **v1.3.0-ce**, SynapCores Community Edition ships **native
+macOS binaries** for both Intel and Apple Silicon Macs running macOS 13
+(Ventura) or later. Native install is now the recommended path. Docker
+remains as a secondary option for users on older macOS releases or who
+prefer container-based deployment.
 
-In the meantime, two well-supported paths get you a working CE
-deployment on macOS in minutes. Pick whichever matches your existing
-toolchain.
+## Option A — Native binary (recommended)
 
-## Option A — Multipass (recommended)
-
-[Multipass](https://multipass.run) runs lightweight Ubuntu VMs natively
-on macOS using Apple's Virtualization framework (Apple Silicon) or
-HyperKit (Intel). Boots in seconds, uses far less RAM than Docker
-Desktop, no background daemon to manage.
-
-### One-time setup
+The same one-liner used on Linux works on macOS 13+:
 
 ```bash
-brew install --cask multipass
+curl -fsSL https://get.synapcores.com | sh
 ```
 
-### Launch an Ubuntu VM and install CE
+The bootstrap detects your OS and CPU architecture and downloads the
+matching tarball:
+
+- macOS Intel → `synapcores-ce-VER-darwin-x86_64.tar.gz`
+- macOS Apple Silicon → `synapcores-ce-VER-darwin-aarch64.tar.gz`
+
+### Runtime dependencies
+
+The macOS binary is dynamically linked against Homebrew-provided
+FFmpeg 7+, Tesseract, Leptonica, FreeType, and Fontconfig. The
+bootstrap installer does **not** auto-install these for you on
+macOS — install them manually before first run:
 
 ```bash
-# Spin up a 22.04 VM sized for CE (8 GB RAM, 4 vCPU, 20 GB disk).
-multipass launch 22.04 --name synapcores --memory 8G --cpus 4 --disk 20G
-
-# Drop into a shell on the VM.
-multipass shell synapcores
-
-# Now inside the VM — install CE the standard way:
-curl -fsSL https://get.synapcores.com/install.sh | sh
+brew install ffmpeg tesseract leptonica freetype fontconfig
 ```
 
-The installer creates the `synapcores` user, lays out
-`/opt/synapcores`, drops the systemd unit, and prints the auto-
-generated admin password. Capture it from `journalctl -u synapcores`.
+If any of those are missing, the gateway will fail to start with a
+dyld load error naming the missing library.
 
-### Start the service and grab the VM's IP
+### First run
 
-Inside the VM:
+There is no systemd on macOS. The two supported ways to run the
+gateway are:
+
+**Foreground (development / testing):**
 
 ```bash
-sudo systemctl edit synapcores
-# Add:
-#   [Service]
-#   Environment="AIDB_JWT_SECRET=$(openssl rand -base64 32)"
-sudo systemctl start synapcores
-exit                                # back to your Mac
+export AIDB_JWT_SECRET="$(openssl rand -base64 32)"
+/usr/local/bin/synapcores --config /usr/local/etc/synapcores/gateway.toml
 ```
 
-Back on macOS:
+**Background via `launchd` (long-lived install):**
+
+Drop a LaunchAgent plist at
+`~/Library/LaunchAgents/com.synapcores.gateway.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.synapcores.gateway</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/synapcores</string>
+    <string>--config</string>
+    <string>/usr/local/etc/synapcores/gateway.toml</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AIDB_JWT_SECRET</key>
+    <string>REPLACE_WITH_256_BIT_RANDOM_STRING</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/log/synapcores.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/synapcores.err</string>
+</dict>
+</plist>
+```
+
+Load it:
 
 ```bash
-multipass info synapcores | grep IPv4
-# IPv4:           192.168.64.7
+launchctl load ~/Library/LaunchAgents/com.synapcores.gateway.plist
 ```
 
-Open `http://192.168.64.7:8080/` in your Mac browser. The bundled Web
-UI loads. Log in as `admin` with the password from the VM's logs.
-
-### Lifecycle
+Tail logs:
 
 ```bash
-# Stop without deleting (keeps data):
-multipass stop synapcores
-
-# Resume:
-multipass start synapcores
-
-# Tear down completely (deletes all data):
-multipass delete synapcores
-multipass purge
+tail -f /usr/local/var/log/synapcores.log
 ```
 
-### Pros / cons
+Capture the first-boot admin password from that log file the same way
+you would from `journalctl` on Linux — search for `FIRST-BOOT`.
 
-**Pros:**
-* No daemon process consuming RAM when not in use
-* Apple's virtualization framework means near-native disk and network throughput on M-series chips
-* Snapshots and shell access feel natural
-* The CE binary runs unchanged — same as a real Linux deployment
+### Apple Silicon vs Intel
 
-**Cons:**
-* You're managing a VM's lifecycle (stop/start/snapshot)
-* No volume mounts to the Mac filesystem by default (use
-  `multipass mount /local/path synapcores:/remote/path` if needed)
+Both architectures are first-class. The bootstrap auto-selects the
+correct tarball — no Rosetta in the path on Apple Silicon.
 
 ## Option B — Docker
 
-If you already have Docker Desktop, this is one-line and probably
-faster to set up than installing Multipass.
-
-### Run the official image
+For users on macOS 12 or earlier, or who simply prefer containerized
+deployment, the official Docker image still works:
 
 ```bash
 docker run --rm -p 8080:8080 \
@@ -135,10 +147,13 @@ docker run -d --name synapcores -p 8080:8080 \
 ### Pros / cons
 
 **Pros:**
+
+* Works on macOS 12 and earlier (no native binary available there)
 * One-line setup if Docker Desktop is already running
 * Familiar tooling for most developers
 
 **Cons:**
+
 * Docker Desktop on macOS has a non-trivial RAM and CPU baseline even
   when idle
 * The licensing of Docker Desktop changed for some company sizes —
@@ -148,19 +163,11 @@ docker run -d --name synapcores -p 8080:8080 \
 
 | If you... | Use |
 | --- | --- |
+| Are on macOS 13+ and want the lightest install | **Native binary** |
+| Care about RAM headroom (no Docker Desktop daemon) | **Native binary** |
+| Are on macOS 12 or earlier | **Docker** |
 | Already have Docker Desktop running for other projects | **Docker** |
-| Want a "real Linux" experience for ops / debugging | **Multipass** |
-| Care about RAM headroom | **Multipass** |
-| Need GPU passthrough (Apple Silicon) for inference | Neither — wait for v1.1 native macOS, or use a remote Linux box |
+| Need GPU passthrough for inference | Build from source with `--features llama-cpp/metal` |
 
-For a polished demo or evaluation on a MacBook, Multipass usually
-feels lighter — you get a real shell on a real Linux box and you can
-treat it the same as a deployment target.
-
-## Apple Silicon vs Intel
-
-Both options work on both architectures. Multipass auto-selects the
-right virtualization backend (Apple Virtualization on M-series, HyperKit
-on Intel). The CE Linux/aarch64 binary runs natively on M-series VMs;
-on Intel Macs you'll get the linux-x86_64 binary. Either way, no
-emulation, no Rosetta in the path.
+For most evaluators on a current MacBook, the native binary is now the
+fastest and cleanest path to a running gateway.

@@ -2,42 +2,46 @@
 
 ## Supported architectures
 
-CE binaries are built for Linux on every release. We don't ship native
-macOS or Windows binaries; both run CE via the [Docker image](quickstart.md#docker)
-or [Multipass](macos.md) (macOS) instead.
+Starting with v1.3.0-ce, CE ships native binaries for Linux **and**
+macOS on every release. Windows users run CE via the
+[Docker image](quickstart.md#docker) or WSL 2.
 
 | Architecture | Triple | Tarball |
 | --- | --- | --- |
 | Linux x86\_64 | `x86_64-unknown-linux-gnu` | `synapcores-ce-VER-linux-x86_64.tar.gz` |
 | Linux aarch64 | `aarch64-unknown-linux-gnu` | `synapcores-ce-VER-linux-aarch64.tar.gz` |
+| macOS x86\_64 (Intel) | `x86_64-apple-darwin` | `synapcores-ce-VER-darwin-x86_64.tar.gz` |
+| macOS aarch64 (Apple Silicon) | `aarch64-apple-darwin` | `synapcores-ce-VER-darwin-aarch64.tar.gz` |
 
 ## Supported Linux distributions
 
-The CE binary is **dynamically linked** against system FFmpeg 4.x,
-Tesseract 4, Leptonica, FreeType, and Fontconfig, and built against
-**glibc 2.35** on Ubuntu 22.04. Its runtime SONAMEs are:
-
-- `libavutil.so.56`, `libavformat.so.58`, `libavcodec.so.58`, `libavfilter.so.7`, `libavdevice.so.58`, `libswresample.so.3`, `libswscale.so.5` (FFmpeg 4 ABI)
-- `libtesseract.so.4`, `libleptonica.so.5` (OCR)
-- `libfreetype.so.6`, `libfontconfig.so.1`
+The CE binary is dynamically linked against system FFmpeg + Tesseract +
+Leptonica + FreeType + Fontconfig. The bootstrap installer
+(`curl -fsSL https://get.synapcores.com | sh`) detects your distro and
+selects the matching tarball variant (FFmpeg 4 SONAMEs for 22.04 /
+Debian 12; FFmpeg 6 SONAMEs for 24.04 / Debian 13). On macOS, the
+`install-ce.sh` equivalent is the user's responsibility — the bootstrap
+doesn't yet auto-set up Homebrew. See [macos.md](macos.md) for the
+manual brew steps.
 
 That gives the following distro matrix:
 
 | Distro | Status | Notes |
 | --- | --- | --- |
-| **Ubuntu 22.04 LTS** | ✅ Supported | Build target. The installer auto-installs runtime deps via `apt-get`. |
-| **Debian 12 (Bookworm)** | ✅ Supported | Same FFmpeg 4 / glibc 2.36. Installer treats it identically to Ubuntu 22.04. |
-| **Ubuntu 24.04 LTS** | ❌ Not yet | Ships FFmpeg 6 (libavutil.so.58); SONAME mismatch. Use Docker, or run 22.04 in a VM, until v1.2.1-ce ships multi-distro builds. |
+| **Ubuntu 22.04 LTS** | ✅ Supported | Native binary, FFmpeg 4 ABI |
+| **Debian 12 (Bookworm)** | ✅ Supported | Native binary, FFmpeg 4 ABI |
+| **Ubuntu 24.04 LTS** | ✅ Supported | Native binary, FFmpeg 6 ABI |
+| **Debian 13 (Trixie)** | ✅ Supported | Native binary, FFmpeg 6 ABI |
+| **macOS 13+ (Intel)** | ✅ Supported | Native binary, Homebrew FFmpeg 7+ |
+| **macOS 14+ (Apple Silicon)** | ✅ Supported | Native binary, Homebrew FFmpeg 7+ |
 | **Ubuntu 20.04 LTS** | ❌ Too old | glibc 2.31 < 2.35; binary won't link even with FFmpeg 4 installed. |
 | **Debian 11 (Bullseye)** | ❌ Too old | glibc 2.31. |
-| **Debian 13 (Trixie)** | ❌ Not yet | FFmpeg 6 SONAME mismatch (same as Ubuntu 24.04). |
 | **RHEL 9 / Rocky 9 / Alma 9** | ⚠️ Untested | glibc 2.34. May work; runtime deps via `dnf install ffmpeg-libs tesseract leptonica freetype fontconfig`. Please [report](support.md) success/failure. |
 | **RHEL 8 / Rocky 8** | ❌ Too old | glibc 2.28. |
 | **CentOS 7** | ❌ Too old | glibc 2.17. End-of-life — please upgrade. |
 | **Amazon Linux 2023** | ⚠️ Untested | glibc 2.34. Same situation as RHEL 9. |
 | **Amazon Linux 2** | ❌ Too old | glibc 2.26. |
 | **Alpine Linux** | ❌ Not supported | musl libc, not glibc. Use a glibc-based distro or Docker. |
-| **macOS (Intel/M-series)** | ❌ Not yet | Run via Docker or [Multipass](macos.md). v1.1+ may add native macOS. |
 | **Windows** | ❌ Not yet | Run via WSL 2 with Ubuntu 22.04. |
 
 When in doubt, **use the Docker image** — it bundles all the right
