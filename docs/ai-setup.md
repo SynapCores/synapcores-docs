@@ -2,39 +2,69 @@
 
 
 The CE binary ships with the **inference engine** ([llama-cpp](https://github.com/ggerganov/llama.cpp)
-embedded), but **no model weights**. Out of the box this means:
+embedded). As of **v1.3.1-ce** the bootstrap installer also offers to
+download a default GGUF model on first run, so **AI Chat works
+end-to-end with zero post-install steps** when you accept the prompt.
 
-| What works without any setup | What needs a model |
+| What works on a fresh install | Notes |
 | --- | --- |
-| SQL, vector storage, recipes, dashboards, REST API, JWT auth, Web UI, document ingest | Embeddings (`EMBED()`, vector search by text) |
-|  | AI Chat |
-|  | NL2SQL (`ASK ...`) |
+| SQL, vector storage, recipes, dashboards, REST API, JWT auth, Web UI | always |
+| Document ingest, FilesystemRAG | always |
+| Embeddings (`EMBED()`, vector search by text) | first call triggers a one-time MiniLM download (~90 MB) into `~/.cache/huggingface/` |
+| **AI Chat** | works if you accept the bootstrap's GGUF download prompt |
+| NL2SQL (`ASK ...`) | works for queries the model can answer directly; tool-using paths require Ollama or a hosted provider — see "Tool-using agents" below |
 
-### Embeddings — auto-downloaded on first use
+### Default install (recommended)
 
-The first call to `EMBED()` (or any vector search by text) triggers a one-
-time download from Hugging Face into `~/.cache/huggingface/`. Default model
-is **MiniLM** (~90 MB, 384-dim). After the first call, embeddings run
-offline. No config required — it Just Works as long as the gateway has
-outbound network access to `huggingface.co`.
+```bash
+curl -fsSL https://get.synapcores.com/install.sh | sh
+# → drops the binary, installs runtime deps, then prompts:
+# [get-synapcores] Download default LLM (Llama 3.2 1B Q4_K_M, ~700MB)? [Y/n]
+# → answer Y and AI Chat works after `systemctl start synapcores`.
+```
 
-### Generative LLM (Chat / NL2SQL) — pick one
+The default config (`/etc/synapcores/gateway.toml` on Linux,
+`~/.synapcores/gateway.toml` on macOS) ships pre-wired:
 
-You have three options. Pick whichever matches your deployment.
+```toml
+[query.ai_service]
+provider        = "native"
+model           = "llama-3.2-1b-instruct-q4_k_m"
+embedding_model = "minilm"
+```
 
-#### Option 1 — Local GGUF (fully offline, no external API)
+### Generative LLM (Chat / NL2SQL) — three options
 
-1. Download a GGUF-quantized model. The community defaults to a 7B-parameter
-   Q4\_K\_M quant for a good size/speed balance (~4.5 GB on disk):
+#### Option 1 — In-process GGUF (default — fully offline)
+
+What the bootstrap does for you on `Y`. To do it manually:
+
+1. Create the models dir:
 
    ```bash
+   # Linux
    sudo -u synapcores mkdir -p /opt/synapcores/models/text
-   sudo -u synapcores curl -fsSL -o /opt/synapcores/models/text/llama-3-8b.gguf \
-        "https://huggingface.co/<repo>/<model>/resolve/main/llama-3-8b-instruct-q4_k_m.gguf"
+   # macOS
+   mkdir -p ~/.synapcores/models/text
    ```
 
-2. Tell the gateway where to find it (the default is `./models/text/`,
-   relative to `data_dir` — pinning to an absolute path is cleaner):
+2. Download a GGUF-quantized model:
+
+   ```bash
+   # Linux
+   sudo -u synapcores curl -fL \
+     -o /opt/synapcores/models/text/llama-3.2-1b-instruct-q4_k_m.gguf \
+     "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+   ```
+
+3. Confirm the gateway's systemd unit (Linux) sets `AIDB_MODELS_DIR`:
+
+   ```bash
+   sudo systemctl cat synapcores | grep AIDB_MODELS_DIR
+   # Expect: Environment=AIDB_MODELS_DIR=/opt/synapcores/models/text
+   ```
+
+   If missing (older install), add it:
 
    ```bash
    sudo systemctl edit synapcores
@@ -43,17 +73,8 @@ You have three options. Pick whichever matches your deployment.
    ```ini
    [Service]
    Environment="AIDB_MODELS_DIR=/opt/synapcores/models/text"
-   # Optional: tune llama-cpp behavior
    Environment="AIDB_CONTEXT_SIZE=4096"
-   Environment="AIDB_GPU_LAYERS=0"        # CPU-only; set higher if you built from source w/ GPU
-   ```
-
-3. Tell the AI service which model to use, in `/etc/synapcores/gateway.toml`:
-
-   ```toml
-   [query.ai_service]
-   provider = "native-gguf"
-   model    = "llama-3-8b"           # filename WITHOUT the .gguf extension
+   Environment="AIDB_GPU_LAYERS=0"  # CPU-only; raise if you built from source w/ GPU
    ```
 
 4. Restart and verify:
@@ -61,11 +82,41 @@ You have three options. Pick whichever matches your deployment.
    ```bash
    sudo systemctl restart synapcores
    sudo journalctl -u synapcores -f | grep -i gguf
-   # Expect: Loading GGUF model: llama-3-8b from "/opt/synapcores/models/text"
+   # Expect: Loading GGUF model: llama-3.2-1b-instruct-q4_k_m from ".../models/text"
    ```
 
-Performance bands on this 7B-Q4 model — see [the platforms README](https://github.com/SynapCores/synapcores-installer#local-llm-inference)
-for details. CPU-only is the default; GPU acceleration requires a source build.
+CPU-only is the default for published binaries; GPU acceleration
+(`--features llama-cpp/cuda` or `metal`) requires a source build.
+Performance bands on the default Llama 3.2 1B Q4_K_M model:
+
+| Hardware | tokens/sec |
+| --- | --- |
+| Apple Silicon M1/M2/M3/M4 (CPU) | 30–80 |
+| Modern x86 with AVX2 (Zen 3+, Intel 11th gen+) | 5–15 |
+| Older x86 without AVX2 | 1–3 |
+
+To swap models, drop a different GGUF in the same dir and update the
+`model` field in the config to its filename without `.gguf`.
+Recommended bigger options:
+
+* **Llama 3.2 3B Instruct Q4_K_M** (~2 GB, better quality)
+* **Phi-3.5 Mini Q4_K_M** (~2 GB, strong reasoning for size)
+* **Qwen 2.5 7B Instruct Q4_K_M** (~4.5 GB, near-frontier quality on CPU)
+
+### Tool-using agents (NL2SQL with tool calls, FilesystemRAG agent search)
+
+The default `native` provider runs in-process llama-cpp inference and
+gives you plain text completions back. **It does not implement
+native tool calling** the way Ollama's `/api/chat` endpoint does, so
+agent flows that require the model to emit structured `tool_calls`
+will fall back to direct text — fine for most chat, but agents that
+chain SQL execution or filesystem search via tool invocation will be
+degraded.
+
+If you need tool-using agents today, swap to Ollama or a hosted
+provider — both implement the tool-calling API. v1.3.2 is expected
+to add prompt-template-based tool extraction so the native provider
+can participate in tool flows too.
 
 #### Option 2 — Wire up Ollama (recommended for evaluation)
 
