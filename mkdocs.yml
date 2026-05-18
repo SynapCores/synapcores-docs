@@ -76,6 +76,7 @@ nav:
       - Web UI: web-ui.md
       - Run on macOS: macos.md
   - Reference:
+      - SQL reference: sql-reference.md
       - Limits & quotas: limits.md
       - Filesystem Collections: filesystem-rag.md
       - Community vs Enterprise: enterprise.md
