@@ -81,7 +81,7 @@ Most MCP clients (Claude Desktop, Claude Code, Cursor, Continue.dev, Windsurf, Z
 ```bash
 mkdir -p ~/.synapcores
 curl -fsSL \
-  https://raw.githubusercontent.com/mataluis2k/aidb/feature/v1.5.0-ce/scripts/integrations/synapcores-mcp-bridge.js \
+  https://github.com/SynapCores/synapcores-releases/releases/latest/download/synapcores-mcp-bridge.js \
   -o ~/.synapcores/synapcores-mcp-bridge.js
 chmod +x ~/.synapcores/synapcores-mcp-bridge.js
 ```
