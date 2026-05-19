@@ -117,6 +117,13 @@ curl -fsSL https://get.synapcores.com | SYNAPCORES_VERSION=v1.0.0 sh
    automatically. See [Filesystem Collections](filesystem-rag.md) for
    the walkthrough.
 
+9. **Integrate from your app.** The full REST contract is published as
+   OpenAPI 3.1 at `http://<your-host>:8080/v1/openapi.json` and a
+   browsable Swagger UI at `/v1/api-docs`. Point your codegen tool at
+   the spec or hit the routes directly — see
+   [REST API reference](api-reference.md) for client-generation
+   examples (TypeScript, Python, Go, PHP).
+
 ## Docker
 
 ```bash

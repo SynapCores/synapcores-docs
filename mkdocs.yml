@@ -77,6 +77,7 @@ nav:
       - Run on macOS: macos.md
   - Reference:
       - SQL reference: sql-reference.md
+      - REST API (OpenAPI + Swagger UI): api-reference.md
       - MCP setup (Claude / Cursor / Continue / Windsurf / Zed / LangChain): mcp-setup.md
       - Limits & quotas: limits.md
       - Filesystem Collections: filesystem-rag.md
