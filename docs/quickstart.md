@@ -127,15 +127,29 @@ curl -fsSL https://get.synapcores.com | SYNAPCORES_VERSION=v1.0.0 sh
 ## Docker
 
 ```bash
-docker run --rm -p 8080:8080 \
-           -v synapcores-data:/var/lib/synapcores \
+docker run -d --name synapcores -p 8080:8080 \
+           -e AIDB_ACCEPT_LICENSE=1 \
            -e AIDB_JWT_SECRET="$(openssl rand -base64 32)" \
+           -v synapcores-data:/var/lib/synapcores \
            ghcr.io/synapcores/community:latest
 ```
 
-The image runs as the unprivileged `synapcores` user, with data persisted
-to the `synapcores-data` volume. Mount that volume to keep state across
-upgrades.
+`AIDB_ACCEPT_LICENSE=1` records consent to the Community Edition License —
+required under Docker, which has no interactive terminal for the click-through
+prompt. The image runs as the unprivileged `synapcores` user, with data
+persisted to the `synapcores-data` volume; mount that volume to keep state
+across upgrades.
+
+**Get your login.** On first boot SynapCores prints a one-time admin username,
+password, and API key to the container logs. Read them with:
+
+```bash
+docker logs synapcores | grep -A 12 FIRST-BOOT
+```
+
+Capture them now — they are shown only once. Then open the web UI at
+`http://localhost:8080` and sign in as `admin` (change the password on first
+login).
 
 ## Upgrading
 
