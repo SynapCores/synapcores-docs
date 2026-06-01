@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.7.0.1-ce` on 2026-05-29
+    **Last synced from**: `v1.7.0.2-ce` on 2026-06-01
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -282,7 +282,8 @@ CREATE EXPERIMENT model_name AS
    [WHERE ...]
 WITH (
     task_type        = 'binary_classification' | 'multi_classification' | 'regression'
-                       | 'clustering' | 'anomaly_detection' | 'time_series',
+                       | 'clustering' | 'time_series',
+                       -- 'anomaly_detection' task_type — coming in v1.8 (Algorithm::IsolationForest + ANOMALY_SCORE())
     target_column    = 'target',
     [optimization_metric = 'auc' | 'accuracy' | 'f1' | 'rmse' | 'mae' | ...,]
     [max_trials      = 50,]
