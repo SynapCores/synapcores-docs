@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.7.0.2.1-ce` on 2026-06-02
+    **Last synced from**: `v1.8.0-ce` on 2026-06-08
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -27,6 +27,9 @@ The features below are AIDB-specific extensions that distinguish AIDB SQL from g
 | Predict with AutoML model    | `SELECT AUTOML.PREDICT('model', col1, col2, ...) AS risk FROM t`      |
 | List/describe models         | `SHOW MODELS`, `DESCRIBE MODEL name`                                  |
 | LLM text generation          | `GENERATE(prompt_text)` -> TEXT                                       |
+| Native-inference model pull  | `PULL_MODEL('qwen2.5-coder:7b')` -> TEXT (v1.8.0+)                    |
+| Native-inference model list  | `LIST_MODELS()` -> table (v1.8.0+)                                    |
+| Native-inference model drop  | `DELETE_MODEL('model_name')` -> TEXT (v1.8.0+)                        |
 | Cypher graph pattern         | `MATCH (n:Label) RETURN n` (per-tenant graph)                         |
 | Cypher graph write           | `CREATE (n:Label {prop: value})`, `MERGE`, `DETACH DELETE n`          |
 
@@ -264,6 +267,80 @@ Higher-level helpers used inside `SEMANTIC JOIN` and multi-modal queries. Prefer
 ### Other built-in AI functions
 
 `CLASSIFY(text, categories)`, `EXTRACT_ENTITIES(text)`, `SENTIMENT(text)`, `SUMMARIZE(text)`, `TRANSLATE(text, target_lang)`.
+
+---
+
+## Native-inference model lifecycle (v1.8.0+)
+
+v1.8.0-ce ships an in-process OCI v2 model registry: the gateway can
+pull GGUF models from `registry.ollama.ai` (or any Docker Distribution
+v2 registry) and serve them via the embedded `local` provider — no
+external Ollama daemon, no separate process. The three functions below
+expose that registry as SQL, alongside the equivalent `synapcores pull`
+/ `synapcores models list` CLI commands.
+
+These functions are active when the gateway is running with
+`[query.ai_service].provider = "local"` (the v1.8 default — set
+automatically when `[query.ai_service]` is omitted from `gateway.toml`).
+The model store lives under `data_dir/models/` with sha256-addressed
+blobs and JSON manifest sidecars.
+
+### `PULL_MODEL(name)` — fetch a model into the local store
+
+* Argument: `TEXT` — model reference. Accepts `name`, `name:tag`,
+  `namespace/name[:tag]`, or `registry/namespace/name[:tag]`.
+  Defaults: registry=`registry.ollama.ai`, namespace=`library`,
+  tag=`latest`.
+* Returns: `TEXT` — the resolved manifest digest.
+* Idempotent: a second pull with the same name short-circuits when
+  the local manifest digest matches the registry's current digest;
+  no blob bytes are re-fetched.
+* Resume: interrupted pulls leave a `.partial` file; re-running
+  `PULL_MODEL` resumes from the byte offset already on disk.
+* Min engine version: **1.8.0**.
+
+```sql
+-- Pull the default 7B chat model (the v1.8 install-script default).
+SELECT PULL_MODEL('qwen2.5-coder:7b');
+
+-- Pull an embedding model (used by EMBED + AGENT_RUN's memory layer).
+SELECT PULL_MODEL('library/all-minilm:latest');
+
+-- Pull from a third-party namespace.
+SELECT PULL_MODEL('bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M');
+```
+
+### `LIST_MODELS()` — inventory the local model store
+
+* Arguments: none.
+* Returns: a table with columns
+  `(name TEXT, architecture TEXT, size_bytes BIGINT, digest TEXT, pulled_at TIMESTAMP, last_used_at TIMESTAMP)`.
+* Reads on-disk manifest sidecars only — never touches the network.
+* Min engine version: **1.8.0**.
+
+```sql
+-- Inventory installed models.
+SELECT * FROM LIST_MODELS();
+
+-- Total disk used by the model store.
+SELECT SUM(size_bytes) AS total_bytes FROM LIST_MODELS();
+```
+
+### `DELETE_MODEL(name)` — remove a model from the local store
+
+* Argument: `TEXT` — model reference (same name forms as `PULL_MODEL`).
+* Returns: `TEXT` — the digest of the removed manifest.
+* Reference-counts content-addressed blobs: a blob shared with another
+  tag is kept on disk until the last reference is dropped.
+* Errors if the model is currently loaded in the LRU; unload it first
+  by pointing `[query.ai_service].model` elsewhere, or restart the
+  gateway.
+* Min engine version: **1.8.0**.
+
+```sql
+-- Remove a model that's no longer needed.
+SELECT DELETE_MODEL('library/qwen2.5-coder:0.5b');
+```
 
 ---
 
