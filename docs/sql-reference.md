@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.8.4-ce` on 2026-06-15
+    **Last synced from**: `v1.8.5-ce` on 2026-06-15
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -267,6 +267,59 @@ Higher-level helpers used inside `SEMANTIC JOIN` and multi-modal queries. Prefer
 ### Other built-in AI functions
 
 `CLASSIFY(text, categories)`, `EXTRACT_ENTITIES(text)`, `SENTIMENT(text)`, `SUMMARIZE(text)`, `TRANSLATE(text, target_lang)`.
+
+### `MEMORY_STORE(namespace, content [, metadata])` — *v1.8.5+*
+
+Stores text in an agent-memory namespace. On first call for a namespace the engine auto-creates the backing table `_memory_<namespace>` `(id TEXT PK, content TEXT NOT NULL, embedding VECTOR(384) NOT NULL, metadata TEXT, created_at TIMESTAMP, accessed_at TIMESTAMP)`. The content is embedded via the configured embedding model (default `all-minilm:latest`, dim 384) and a row is INSERTed under a sortable id (`mem_<base32 ts>_<6 alphanum>`).
+
+* `namespace` MUST match `^[A-Za-z_][A-Za-z0-9_]*$`.
+* `metadata` is optional and stored verbatim — convention: JSON-encoded with fields like `importance`, `kind`, `source`.
+* Returns: `TEXT` — the generated memory id.
+* Per-tenant scoped via the standard storage path.
+
+```sql
+-- Store a user preference
+SELECT MEMORY_STORE('default', 'I prefer Python over Java') AS memory_id;
+
+-- Store with importance metadata
+SELECT MEMORY_STORE('default', 'Customer renewed annual plan',
+                    '{"importance": 0.9, "kind": "fact"}') AS memory_id;
+```
+
+### `MEMORY_RECALL(namespace, query [, top_k])` — *v1.8.5+, table-valued*
+
+Semantically retrieves the most-similar stored memories for a free-text query. Used in a `FROM` clause. Embeds the query via the same provider as `MEMORY_STORE`, scans the namespace's backing table, computes cosine similarity, and returns the top `top_k` rows ordered by similarity DESC. Columns: `(id TEXT, content TEXT, similarity REAL in [0,1], metadata TEXT, created_at TIMESTAMP)`. `top_k` defaults to 10, capped at 100. If `_memory_<namespace>` doesn't exist yet, returns an empty result set (not an error). Best-effort bumps `accessed_at` on the rows returned.
+
+```sql
+-- Retrieve top 5 similar memories
+SELECT id, content, similarity
+  FROM MEMORY_RECALL('default', 'what languages do I like', 5);
+
+-- Join recalled memories with a downstream prompt
+WITH r AS (
+  SELECT content, similarity
+    FROM MEMORY_RECALL('default', 'return policy', 3)
+)
+SELECT GENERATE('Given context: ' || STRING_AGG(content, ' | ') ||
+                '. Answer: what is the return policy?') AS answer
+  FROM r;
+```
+
+### `MEMORY_FORGET(namespace, id)` — *v1.8.5+*
+
+Hard-deletes the memory identified by `id`. Returns `BOOLEAN` — `true` if a row was deleted, `false` if the id didn't exist. Same namespace validation as `MEMORY_STORE`. If `_memory_<namespace>` doesn't exist yet, returns `false` (no error).
+
+```sql
+-- Forget a single memory by id
+SELECT MEMORY_FORGET('default', 'mem_abc123') AS deleted;
+
+-- Age-out cold memories
+SELECT MEMORY_FORGET('default', id) AS deleted
+  FROM (
+    SELECT id FROM MEMORY_RECALL('default', 'irrelevant', 100)
+     WHERE similarity < 0.2
+  ) AS cold;
+```
 
 ---
 
