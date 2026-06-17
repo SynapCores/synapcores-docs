@@ -26,4 +26,4 @@ Release artifacts (binaries + SHA-256 sidecars + the install script) live on the
 |---|---|---|
 | [**v1.8.5-ce**](v1.8.5-ce.md) | 2026-06-15 | Agent-memory primitives — `MEMORY_STORE` / `MEMORY_RECALL` / `MEMORY_FORGET` |
 
-Older releases are documented on their [GitHub release pages](https://github.com/SynapCores/synapcores-releases/releases) until they are migrated here.
+For every prior release (v1.0 → v1.8.4) with short user-facing summaries — what was fixed, what to watch out for if you're on that exact tag — see the [**Full changelog**](changelog.md). Per-release deep-dive pages are added going forward starting with v1.8.5.
