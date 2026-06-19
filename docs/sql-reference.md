@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.8.6.1-ce` on 2026-06-18
+    **Last synced from**: `v1.8.7-ce` on 2026-06-19
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -26,7 +26,8 @@ The features below are AIDB-specific extensions that distinguish AIDB SQL from g
 | Train AutoML model           | `CREATE EXPERIMENT name AS SELECT ... WITH (task_type=..., ...)`      |
 | Predict with AutoML model    | `SELECT AUTOML.PREDICT('model', col1, col2, ...) AS risk FROM t`      |
 | List/describe models         | `SHOW MODELS`, `DESCRIBE MODEL name`                                  |
-| LLM text generation          | `GENERATE(prompt_text)` -> TEXT                                       |
+| LLM text generation          | `GENERATE(prompt_text [, options_json])` -> TEXT                       |
+| JSON object literal builder  | `json_object(key, val, ...)` -> JSON  *(v1.8.7+)*                       |
 | Native-inference model pull  | `PULL_MODEL('qwen2.5-coder:7b')` -> TEXT (v1.8.0+)                    |
 | Native-inference model list  | `LIST_MODELS()` -> table (v1.8.0+)                                    |
 | Native-inference model drop  | `DELETE_MODEL('model_name')` -> TEXT (v1.8.0+)                        |
@@ -243,21 +244,65 @@ SELECT id, EUCLIDEAN_DISTANCE(description_vec, EMBED('hiking boots')) AS dist
  LIMIT 5;
 ```
 
-### `GENERATE(prompt)`
+### `GENERATE(prompt [, options])`
 
 Calls the configured completion model and returns the generated text.
 
-* Argument: `TEXT` prompt.
+* Arguments:
+  * `prompt` (`TEXT`, required) — the prompt sent to the model.
+  * `options` (`JSON` object, optional, *v1.8.7+*) — sampling + output-shape knobs. Build with `json_object()`. Recognized keys:
+    * `max_tokens` (INT, default 4096 in *v1.8.7+*, was 200 prior).
+    * `temperature` (FLOAT)
+    * `top_p` (FLOAT 0–1)
+    * `top_k` (INT)
+    * `repeat_penalty` (FLOAT)
+    * `seed` (INT) — same seed + same prompt → reproducible output
+    * `system` (TEXT) — system prompt override
+    * `grammar` (TEXT) — GBNF grammar to constrain sampling
+    * `grammar_triggers` (JSON array) — when set with `grammar`, the grammar activates lazily once a trigger string appears
+    * `response_format` (`"json"`) — engine applies a built-in lazy JSON grammar so output is a valid JSON value
 * Returns: `TEXT`.
-* Cached on identical prompt within a session (call latency drops to ~0 after first call).
+* Cached on identical (prompt, options) tuple within a session.
 * Local LLMs are slow per-row — use `GENERATE` for small result sets, not full-table scans.
 
 ```sql
+-- Pre-v1.8.7 form — still works.
 SELECT id,
        GENERATE('Summarize this customer review in one sentence: ' || review_text) AS summary
   FROM reviews
  WHERE rating <= 2
  LIMIT 50;
+
+-- v1.8.7+ — deterministic JSON output with full sampling control.
+SELECT GENERATE(
+  'Extract product, sentiment, reason as JSON: ' || review_text,
+  json_object(
+    'max_tokens', 1024,
+    'temperature', 0.2,
+    'top_p', 0.95,
+    'seed', 42,
+    'response_format', 'json'
+  )
+) AS analysis
+  FROM reviews LIMIT 10;
+```
+
+### `json_object(key1, value1, key2, value2, ...)` *(v1.8.7+)*
+
+Builds a JSON object literal from an even-length alternating list of `(key, value)` arguments. Designed for the options bag passed to `GENERATE` and other AI functions, but usable anywhere a `JSON` value is accepted (column default, expression, INSERT). Keys must be `TEXT`; values can be any scalar SQL type — they're serialized to their JSON form. Errors on odd-length argument lists or non-text keys.
+
+* Returns: `JSON`.
+
+```sql
+-- Inline options for GENERATE.
+SELECT GENERATE('Answer in one word: capital of France?',
+                json_object('max_tokens', 8, 'temperature', 0.0)) AS answer;
+
+-- Use as a JSON column default.
+CREATE TABLE prefs (
+  user_id INTEGER PRIMARY KEY,
+  settings JSON DEFAULT json_object('theme', 'dark', 'notifications', true)
+);
 ```
 
 ### `SEMANTIC_MATCH`, `MULTI_MODAL_SIMILARITY`, `CROSS_MODAL_SEARCH`
