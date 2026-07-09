@@ -85,6 +85,8 @@ nav:
   - Releases:
       - Overview: releases/index.md
       - Full changelog (v1.0 → latest): releases/changelog.md
+      - v1.8.7-ce — GENERATE options: releases/v1.8.7-ce.md
+      - v1.8.6.1-ce — Docker OOB fix: releases/v1.8.6.1-ce.md
       - v1.8.5-ce — Agent memory: releases/v1.8.5-ce.md
   - Support: support.md
   - Community: https://github.com/SynapCores/synapcores-docs/discussions
