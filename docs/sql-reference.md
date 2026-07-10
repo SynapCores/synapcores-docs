@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.8.7-ce` on 2026-06-19
+    **Last synced from**: `v1.8.9-ce` on 2026-07-10
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -313,14 +313,20 @@ Higher-level helpers used inside `SEMANTIC JOIN` and multi-modal queries. Prefer
 
 `CLASSIFY(text, categories)`, `EXTRACT_ENTITIES(text)`, `SENTIMENT(text)`, `SUMMARIZE(text)`, `TRANSLATE(text, target_lang)`.
 
-### `MEMORY_STORE(namespace, content [, metadata])` — *v1.8.5+*
+### `MEMORY_STORE(namespace, content [, metadata [, options]])` — *v1.8.5+ (`options`: v1.8.9+)*
 
 Stores text in an agent-memory namespace. On first call for a namespace the engine auto-creates the backing table `_memory_<namespace>` `(id TEXT PK, content TEXT NOT NULL, embedding VECTOR(384) NOT NULL, metadata TEXT, created_at TIMESTAMP, accessed_at TIMESTAMP)`. The content is embedded via the configured embedding model (default `all-minilm:latest`, dim 384) and a row is INSERTed under a sortable id (`mem_<base32 ts>_<6 alphanum>`).
 
 * `namespace` MUST match `^[A-Za-z_][A-Za-z0-9_]*$`.
 * `metadata` is optional and stored verbatim — convention: JSON-encoded with fields like `importance`, `kind`, `source`.
+* `options` is an optional JSON object (build one with `json_object(...)`). The only key today is `dedup`.
 * Returns: `TEXT` — the generated memory id.
 * Per-tenant scoped via the standard storage path.
+
+> **This is an unconditional insert.** Storing the same content twice creates two rows. Pass
+> `json_object('dedup', true)` as the fourth argument to route the write through
+> [`MEMORY_UPSERT`](#memory_upsertnamespace-content--options--natural_key--v189)'s `noop_if_equal`
+> policy, which returns the existing row's id instead of duplicating it.
 
 ```sql
 -- Store a user preference
@@ -329,6 +335,85 @@ SELECT MEMORY_STORE('default', 'I prefer Python over Java') AS memory_id;
 -- Store with importance metadata
 SELECT MEMORY_STORE('default', 'Customer renewed annual plan',
                     '{"importance": 0.9, "kind": "fact"}') AS memory_id;
+
+-- Store without creating a duplicate row (v1.8.9+)
+SELECT MEMORY_STORE('default', 'I prefer Python over Java',
+                    NULL, json_object('dedup', true)) AS memory_id;
+```
+
+### `MEMORY_UPSERT(namespace, content [, options | natural_key])` — *v1.8.9+*
+
+Idempotent, policy-driven write. Where `MEMORY_STORE` always inserts, `MEMORY_UPSERT` first looks
+for the row this content should supersede, then applies a conflict-resolution policy.
+
+* Returns: `TEXT` — the action taken, one of `'ADD'`, `'UPDATE'`, `'DELETE'`, `'NOOP'`.
+* **Matching.** With a `key`, the row whose metadata carries the same `_key`. Without one, the row
+  whose embedding is within `similarity_threshold` (default `0.95`) cosine of the new content —
+  *semantic keying*, so an agent can revise a belief without having invented a key for it.
+* **Third argument.** Either a bare `TEXT` natural key, or a JSON object built with `json_object(...)`.
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `key` | TEXT | — | Natural key. Absent ⇒ semantic keying. |
+| `policy` | TEXT | `replace` | See below. |
+| `confidence` | REAL `[0,1]` | `1.0` | Confidence of the incoming assertion. |
+| `similarity_threshold` | REAL `[0,1]` | `0.95` | Cosine bar for semantic keying. |
+| `metadata` | TEXT \| JSON | — | Merged into the stored metadata object. |
+| `deleted` | BOOLEAN | `false` | Retract: delete the matched row. |
+| `audit` | BOOLEAN | `true` | Emit a row into `_system_agent_memory_audit`. |
+
+**Policies**
+
+| Policy | Behavior |
+|---|---|
+| `replace` | Overwrite verbatim. `ADD` when absent, `UPDATE` when present. |
+| `replace_higher_confidence` | Write only if the new confidence ≥ the stored one; otherwise `NOOP`. A low-confidence guess never clobbers a high-confidence fact. |
+| `merge_max_confidence` | Always write, keeping `MAX(new, stored)` confidence. |
+| `append_history` | Never overwrite — insert a superseding row with `_version = prev + 1`. The belief timeline is retained. |
+| `noop_if_equal` | `NOOP` when the content is byte-identical; otherwise behaves as `replace`. |
+
+**Retraction.** `deleted: true`, or `confidence: 0`, deletes the matched row and returns `'DELETE'`.
+Retracting a belief that was never held is a `NOOP`, not an error.
+
+**Reserved metadata keys.** Confidence, key and version live inside the `metadata` JSON object under
+`_confidence`, `_key` and `_version` — so namespaces created by v1.8.5 `MEMORY_STORE` keep working
+with no migration and no schema divergence.
+
+**Audit.** Every non-`NOOP` call (and every confidence-declined `NOOP`) appends a row to
+`_system_agent_memory_audit` `(audit_id, namespace, memory_id, natural_key, action, policy,
+old_value, new_value, caller, timestamp)`. Audit writes are best-effort: an audit failure never
+fails the write you asked for. Disable per-call with `audit: false`.
+
+```sql
+-- Revise a belief, keeping the higher-confidence one
+SELECT MEMORY_UPSERT('default', 'User is pescatarian',
+                     json_object('key', 'dietary',
+                                 'policy', 'replace_higher_confidence',
+                                 'confidence', 0.95)) AS action;
+-- 'UPDATE'
+
+-- Semantic dedup — no key needed
+SELECT MEMORY_UPSERT('default', 'I prefer Python over Java') AS action;
+-- 'NOOP' if a near-identical memory already exists, else 'ADD'
+
+-- Natural key as a bare string
+SELECT MEMORY_UPSERT('conv_42', 'Prefers email over phone', 'contact_pref') AS action;
+
+-- Retract a fact the agent no longer holds
+SELECT MEMORY_UPSERT('default', 'User is vegetarian',
+                     json_object('key', 'dietary', 'deleted', true)) AS action;
+-- 'DELETE'
+
+-- Keep the full belief timeline instead of overwriting
+SELECT MEMORY_UPSERT('default', 'Now on the enterprise plan',
+                     json_object('key', 'plan', 'policy', 'append_history')) AS action;
+-- 'ADD' (with _version bumped)
+
+-- Audit what the agent changed its mind about
+SELECT action, old_value, new_value, timestamp
+  FROM _system_agent_memory_audit
+ WHERE namespace = 'default'
+ ORDER BY timestamp DESC;
 ```
 
 ### `MEMORY_RECALL(namespace, query [, top_k])` — *v1.8.5+, table-valued*
@@ -364,6 +449,62 @@ SELECT MEMORY_FORGET('default', id) AS deleted
     SELECT id FROM MEMORY_RECALL('default', 'irrelevant', 100)
      WHERE similarity < 0.2
   ) AS cold;
+```
+
+### `AGENT_RUN(persona, task [, options])` — *v1.6.6.9+ (`options`: v1.8.9+)*
+
+Runs a complete in-database agent loop — the ReAct pattern: reason → call tool → observe → repeat —
+and returns the agent's final answer as `TEXT`. The agent sees the same per-tenant database as the
+calling session, with the tools `execute_query`, `list_tables`, `describe_table` and `rag_search`.
+
+Requires a tool-capable LLM configured in `[query.ai_service]` (e.g. `qwen2.5-coder:7b` via the
+embedded `local` provider — the v1.8 default — or Ollama / OpenAI / Anthropic / Gemini).
+
+* `persona` — the agent persona; `'aidb-assistant'` is the built-in default.
+* `task` — a natural-language instruction.
+* `options` — optional JSON object, built with `json_object(...)`:
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `max_iterations` | INT | `5` | ReAct tool-call cap. Clamped to `1..10`. |
+| `timeout_ms` | INT | `600000` | Wall-clock budget. Clamped to `1000..600000`. |
+
+Out-of-range numbers are **clamped**, not rejected — failing a long agentic query on a knob is worse
+than capping it. Unknown option keys **are** an error, so typos surface immediately.
+
+Two keys are rejected rather than accepted:
+
+> **`allow_writes` — the agent's database tools are always read-only from SQL.** A per-query flag
+> would let any authenticated caller escalate a read-only agent into a writing one. Write capability
+> is declared once by an operator on a durable agent (`CREATE AGENT`, v1.9.0), never per query.
+
+> **`model` — not supported in v1.8.9.** The chat engine resolves the model as persona-then-config,
+> so a per-call override is silently ignored rather than applied, and the `local` provider falls back
+> to an already-loaded model when handed an unknown name. Rather than ship a knob that lies, the
+> option errors. Set the model in `[query.ai_service]` or on the persona.
+
+Returns `NULL` only when no agent service is wired (i.e. the AI service is not configured); every
+other failure returns a `TEXT` value prefixed `AGENT_RUN error:` so it survives `COALESCE` in a
+procedure body while remaining greppable.
+
+```sql
+-- Aggregation + reasoning
+SELECT AGENT_RUN('aidb-assistant',
+  'Execute SELECT category, SUM(price*stock) FROM products GROUP BY category,
+   then tell me which category has the highest total') AS reply;
+
+-- Bound a long agentic query
+SELECT AGENT_RUN('aidb-assistant', 'Investigate the slowest query',
+                 json_object('max_iterations', 3, 'timeout_ms', 60000)) AS reply;
+
+-- Composed in a CTE
+WITH triaged AS (
+  SELECT order_id,
+         AGENT_RUN('returns-triage',
+                   'Process return for order_id ' || CAST(order_id AS TEXT)) AS recommendation
+    FROM pending_returns
+)
+SELECT * FROM triaged;
 ```
 
 ---
