@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.8.9-ce` on 2026-07-10
+    **Last synced from**: `v1.9.0-ce` on 2026-07-13
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -466,22 +466,17 @@ embedded `local` provider — the v1.8 default — or Ollama / OpenAI / Anthropi
 
 | Option | Type | Default | Meaning |
 |---|---|---|---|
+| `model` | TEXT | persona / config | Override the model for this call (v1.8.10+). Outranks the persona and config default; an uninstalled name errors. |
 | `max_iterations` | INT | `5` | ReAct tool-call cap. Clamped to `1..10`. |
 | `timeout_ms` | INT | `600000` | Wall-clock budget. Clamped to `1000..600000`. |
 
 Out-of-range numbers are **clamped**, not rejected — failing a long agentic query on a knob is worse
 than capping it. Unknown option keys **are** an error, so typos surface immediately.
 
-Two keys are rejected rather than accepted:
-
-> **`allow_writes` — the agent's database tools are always read-only from SQL.** A per-query flag
-> would let any authenticated caller escalate a read-only agent into a writing one. Write capability
-> is declared once by an operator on a durable agent (`CREATE AGENT`, v1.9.0), never per query.
-
-> **`model` — not supported in v1.8.9.** The chat engine resolves the model as persona-then-config,
-> so a per-call override is silently ignored rather than applied, and the `local` provider falls back
-> to an already-loaded model when handed an unknown name. Rather than ship a knob that lies, the
-> option errors. Set the model in `[query.ai_service]` or on the persona.
+> **`allow_writes` is rejected — the agent's database tools are always read-only from SQL.** A
+> per-query flag would let any authenticated caller escalate a read-only agent into a writing one.
+> Write capability is declared once by an operator on a durable agent (`CREATE AGENT`, v1.9.0), never
+> per query.
 
 Returns `NULL` only when no agent service is wired (i.e. the AI service is not configured); every
 other failure returns a `TEXT` value prefixed `AGENT_RUN error:` so it survives `COALESCE` in a
