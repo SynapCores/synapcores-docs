@@ -24,6 +24,7 @@ Release artifacts (binaries + SHA-256 sidecars + the install script) live on the
 
 | Version | Date | Headline |
 |---|---|---|
+| [**v1.9.0-ce**](v1.9.0-ce.md) | 2026-07-13 | The Autonomous Database — `CREATE AGENT` durable agents (schedule/event activations, governance, audit) + native cross-encoder reranker + reliability batch |
 | [**v1.8.9-ce**](v1.8.9-ce.md) | 2026-07-10 | Agent memory upsert — `MEMORY_UPSERT` (revise/retract beliefs) + `AGENT_RUN` per-call limits + security hardening |
 | [**v1.8.7-ce**](v1.8.7-ce.md) | 2026-06-19 | Controllable generation — `GENERATE(prompt, options)` sampling/JSON-output knobs + `json_object()` |
 | [**v1.8.6.1-ce**](v1.8.6.1-ce.md) | 2026-06-18 | Docker OOB EMBED + AGENT_RUN restored (Dockerfile-only fix on v1.8.6 engine; carries the `#388` negative-vector-literal SQL fix) |
