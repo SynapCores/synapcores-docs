@@ -116,6 +116,57 @@ UPDATE products SET description_vec = EMBED(description)
 
 ---
 
+## MySQL compatibility (v1.10.0-ce)
+
+The MySQL dialect that applications actually depend on runs unchanged, and `UNIQUE` / `PRIMARY KEY`
+constraints are enforced (index-backed), not silently accepted.
+
+**Upserts (F1)** — `ON DUPLICATE KEY UPDATE`, `INSERT IGNORE`, and `REPLACE`:
+
+```sql
+INSERT INTO inventory (sku, qty) VALUES ('A1', 5)
+ON DUPLICATE KEY UPDATE qty = qty + 5;
+
+INSERT IGNORE INTO inventory (sku, qty) VALUES ('A1', 1);   -- no-op on conflict
+REPLACE INTO inventory (sku, qty) VALUES ('A1', 9);         -- delete-then-insert
+```
+
+**JSON (F2)** — path operators `->` (JSON) / `->>` (text) plus `JSON_EXTRACT`, `JSON_SET`,
+`JSON_ARRAY`, `JSON_OBJECT`, `JSON_CONTAINS`:
+
+```sql
+SELECT data->>'$.email'                     AS email,
+       JSON_EXTRACT(data, '$.plan')         AS plan
+FROM   users
+WHERE  JSON_CONTAINS(tags, '"vip"');
+```
+
+**ENUM (F3), auto-timestamp (F4), full-text (F5), type aliases (F6):**
+
+```sql
+CREATE TABLE tickets (
+  id         INT PRIMARY KEY,
+  status     ENUM('open','pending','closed'),          -- enforced as CHECK (status IN (...))
+  note       VARCHAR(255),                              -- MySQL type aliases accepted
+  updated_at TIMESTAMP ON UPDATE CURRENT_TIMESTAMP      -- refreshes on every UPDATE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE docs (id INT, body TEXT, FULLTEXT(body));
+SELECT id FROM docs WHERE MATCH(body) AGAINST('quick fox');
+```
+
+Also mapped to the native format: `DATETIME`, `LONGBLOB`, `DECIMAL`, `DOUBLE`, `BIGINT`,
+`VARCHAR(n)`, `utf8mb4` charset clauses, `ENGINE=InnoDB`.
+
+**Constraint enforcement (F7)** — a duplicate on a `UNIQUE`/`PRIMARY KEY` column is rejected; a
+`DELETE` frees the key so a re-insert succeeds (MySQL semantics). Enforcement is index-backed
+(O(log n)), so it does not slow inserts at scale.
+
+**mysqldump import (S1)** — the CLI can ingest a `mysqldump` file directly; oversized `INSERT`s are
+chunked and MySQL escape / `DELIMITER` / `LOCK` / `SET` syntax is translated or skipped.
+
+---
+
 ## Query Language
 
 ### SELECT
