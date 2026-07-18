@@ -24,6 +24,7 @@ Release artifacts (binaries + SHA-256 sidecars + the install script) live on the
 
 | Version | Date | Headline |
 |---|---|---|
+| [**v1.11.0-ce**](v1.11.0-ce.md) | 2026-07-18 | MySQL wire protocol — connect Metabase / DBeaver / DataGrip / any MySQL client with just a connection string (OOB admin login); `[mysql_wire]` listener + `SHOW …` / `information_schema` introspection |
 | [**v1.10.0-ce**](v1.10.0-ce.md) | 2026-07-16 | MySQL compatibility — `ON DUPLICATE KEY UPDATE`, JSON accessors, `ENUM`, `ON UPDATE CURRENT_TIMESTAMP`, `FULLTEXT`/`MATCH`, type aliases, mysqldump import, and index-backed constraint enforcement |
 | [**v1.9.1-ce**](v1.9.1-ce.md) | 2026-07-14 | Tamper-evident agent decision lineage — every `_system_agent_runs` record hash-chained; detect tampering with `WHERE verified = false` |
 | [**v1.9.0-ce**](v1.9.0-ce.md) | 2026-07-13 | The Autonomous Database — `CREATE AGENT` durable agents (schedule/event activations, governance, audit) + native cross-encoder reranker + reliability batch |
