@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.11.0-ce` on 2026-07-18
+    **Last synced from**: `v1.12.0-ce` on 2026-07-26
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -95,6 +95,65 @@ CREATE [UNIQUE] INDEX [IF NOT EXISTS] idx_name ON t (col [ASC|DESC], ...);
 DROP   INDEX [IF EXISTS] idx_name;
 ```
 
+### Immutable (append-only) tables and chain attestation
+
+```sql
+CREATE IMMUTABLE TABLE audit_log (
+    id         BIGINT PRIMARY KEY,
+    actor      TEXT NOT NULL,
+    action     TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO audit_log (id, actor, action) VALUES (1, 'alice', 'LOGIN');
+
+-- UPDATE and DELETE are refused on an immutable table.
+
+VERIFY TABLE audit_log;          -- -> is_valid BOOL, message TEXT     (v1.12.0+)
+VERIFY RECORD 1 IN audit_log;    -- -> record_id, is_valid, message    (v1.12.0+)
+```
+
+`CREATE IMMUTABLE TABLE` writes every row into a hash-chained, append-only block store
+in addition to the table itself.
+
+`VERIFY TABLE <t>` attests that chain: it walks every block, recomputes each record
+checksum, each sealed block's checksum and merkle root, and each block-to-block link,
+then cross-checks the number of chained records against the rows actually stored.
+`message` reports the number of records/blocks verified, or the first break found.
+`VERIFY TABLE` on a table that is **not** immutable returns an error rather than a pass.
+
+`VERIFY RECORD <id> IN <t>` attests a single record: it recomputes that record's
+checksum and proves its membership in its block's merkle tree. `<id>` is the row's SQL
+id (matched against the chained payload) or the chain's internal record id.
+
+Immutable tables must be created empty with an explicit column list —
+`CREATE IMMUTABLE TABLE ... AS SELECT` is not supported; populate with
+`INSERT` / `INSERT ... SELECT`.
+
+**Encryption at rest (v1.12.0+):**
+
+```sql
+CREATE IMMUTABLE TABLE ssn_ledger (
+    id      BIGINT PRIMARY KEY,
+    subject TEXT NOT NULL,
+    secret  TEXT NOT NULL
+) WITH (ENCRYPTION='AES256GCM');
+```
+
+`WITH (ENCRYPTION='AES256GCM')` encrypts **both** the hash-chain and the row-engine copy
+on disk. Requirements and behavior:
+
+- Requires the `AIDB_IMMUTABLE_MASTER_KEY` environment variable (a hex-encoded key). If it
+  is missing or invalid, the `CREATE` is **rejected** — never downgraded to a plaintext
+  table (fail-closed).
+- `AES256GCM` is the only supported algorithm. An unsupported or missing algorithm
+  (e.g. bare `WITH (ENCRYPTION)` or `ENCRYPTION='AES128'`) is rejected.
+- `ENCRYPTION_KEY='name'` (a named-key registry) is **not** supported in this release; use
+  `ENCRYPTION='AES256GCM'` alone — the table gets an auto-generated per-table key wrapped
+  by the master key.
+- Encrypted immutable tables are supported only in the **default database**; creating one
+  under another database is rejected.
+
 ---
 
 ## Data Manipulation Language (DML)
@@ -164,6 +223,25 @@ Also mapped to the native format: `DATETIME`, `LONGBLOB`, `DECIMAL`, `DOUBLE`, `
 
 **mysqldump import (S1)** — the CLI can ingest a `mysqldump` file directly; oversized `INSERT`s are
 chunked and MySQL escape / `DELIMITER` / `LOCK` / `SET` syntax is translated or skipped.
+
+**MySQL wire-protocol front-end (S3)** — existing MySQL clients (DBeaver, Metabase, Connector/J,
+mysql CLI, Node/PHP drivers) can connect directly over the MySQL wire protocol. It is **off by
+default**; enable it under `[mysql_wire]` in the gateway config:
+
+```toml
+[mysql_wire]
+enabled     = true
+bind        = "127.0.0.1"
+port        = 3307          # default is 3307 (NOT MySQL's 3306) so it can run alongside
+                            # an existing MySQL/MariaDB on 3306; set port = 3306 for the classic port
+require_tls = false         # when true, non-TLS clients are refused; the listener reuses the
+                            # gateway HTTPS cert ([server] tls_cert_path / tls_key_path) and refuses
+                            # to start if require_tls is true but no server cert is configured
+```
+
+Authenticate with your SynapCores **username** and **API key** (used as the MySQL password).
+When `require_tls = false` (default) TLS is still *offered* whenever a server cert exists, so
+clients may opt into encryption; `require_tls = true` makes it mandatory.
 
 ---
 
@@ -869,6 +947,60 @@ SHOW TRIGGERS [FROM table_name] [LIKE 'pattern'];
 ```sql
 ASK '<natural language question>';            -- run a natural language query
 EXPLAIN NATURAL '<natural language question>'; -- show the SQL plan
+```
+
+---
+
+## Operator configuration
+
+These are gateway (`community.toml`) settings and CLI, not SQL — included here because they
+feed docs.synapcores.com and affect how the engine runs.
+
+### Timeouts for in-process LLM operations (v1.12.0+)
+
+The shipped config defaults were raised so first-token cold starts on in-process (native GGUF)
+models don't trip a request timeout:
+
+```toml
+[server]
+request_timeout = 300        # seconds (was 30)
+
+[query]
+default_timeout_ms = 300000  # was 30000
+```
+
+### Anonymous product telemetry (v1.12.0+, opt-out)
+
+SynapCores sends a small amount of **anonymous** usage telemetry to measure the install
+footprint. What is sent: a random installation id (a UUID with no link to you), the product
+version + edition, and the deployment / OS / architecture. What is **never** sent: SQL, database
+or table names, schemas, prompts, embeddings, credentials, hostnames, usernames, IP addresses,
+or any row / customer data. It runs on a detached background task and can never slow down or
+affect the database.
+
+```toml
+[telemetry]
+enabled  = true
+endpoint = "https://telemetry.synapcores.com"
+# heartbeat_hours = 24   # optional cadence override (default 24h)
+```
+
+Turn it off in any of these ways:
+
+- set `[telemetry] enabled = false`, or
+- run `synapcores telemetry disable`, or
+- set the environment variable `DO_NOT_TRACK=1`, or
+- set the environment variable `SYNAPCORES_TELEMETRY=off`.
+
+Operator CLI (`synapcores telemetry <sub>`):
+
+```bash
+synapcores telemetry status                  # enabled?, installation id, endpoint, effective state + reason
+synapcores telemetry preview                 # print the EXACT outbound heartbeat JSON (no send)
+synapcores telemetry test --send             # send one event now and report success/failure
+synapcores telemetry enable                  # persist an explicit choice (overrides the config flag)
+synapcores telemetry disable
+synapcores telemetry reset-installation-id   # mint a fresh installation id on next boot
 ```
 
 ---
