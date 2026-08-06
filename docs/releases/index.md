@@ -24,6 +24,7 @@ Release artifacts (binaries + SHA-256 sidecars + the install script) live on the
 
 | Version | Date | Headline |
 |---|---|---|
+| [**v1.14.1-ce**](v1.14.1-ce.md) | 2026-08-06 | MongoDB Data Sync — replicate a Mongo collection into a queryable SQL table (`_id`→PK, nested fields→JSON); data sync on by default; graph queries ~20× faster |
 | [**v1.14.0-ce**](v1.14.0-ce.md) | 2026-07-29 | Native Vision — `POST /v1/multimodal/describe` interprets an image with a vision LLM entirely in-process (native `libmtmd`/LLaVA); no cloud, no API key, no daemon; CPU-friendly; the image never leaves the box |
 | [**v1.11.0-ce**](v1.11.0-ce.md) | 2026-07-18 | MySQL wire protocol — connect Metabase / DBeaver / DataGrip / any MySQL client with just a connection string (OOB admin login); `[mysql_wire]` listener + `SHOW …` / `information_schema` introspection |
 | [**v1.10.0-ce**](v1.10.0-ce.md) | 2026-07-16 | MySQL compatibility — `ON DUPLICATE KEY UPDATE`, JSON accessors, `ENUM`, `ON UPDATE CURRENT_TIMESTAMP`, `FULLTEXT`/`MATCH`, type aliases, mysqldump import, and index-backed constraint enforcement |
