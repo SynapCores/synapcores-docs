@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.14.1.1-ce` on 2026-08-07
+    **Last synced from**: `v1.14.2-ce` on 2026-08-10
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -33,6 +33,10 @@ The features below are AIDB-specific extensions that distinguish AIDB SQL from g
 | Native-inference model drop  | `DELETE_MODEL('model_name')` -> TEXT (v1.8.0+)                        |
 | Cypher graph pattern         | `MATCH (n:Label) RETURN n` (per-tenant graph)                         |
 | Cypher graph write           | `CREATE (n:Label {prop: value})`, `MERGE`, `DETACH DELETE n`          |
+| Persona as a database object | `CREATE PERSONA name WITH (system_prompt = '...')` (v1.14.2+)          |
+| Persona inspection           | `SHOW PERSONAS [LIKE '...']`, `DESCRIBE PERSONA name` (v1.14.2+)       |
+| Fire a durable agent async   | `WAKE AGENT name` (v1.14.2+)                                          |
+| Agent-to-agent chaining      | `... ON INSERT INTO t ALLOW AGENT ORIGIN` (v1.14.2+)                   |
 
 ---
 
@@ -630,6 +634,171 @@ WITH triaged AS (
 )
 SELECT * FROM triaged;
 ```
+
+---
+
+## Personas (v1.14.2+)
+
+A persona is the reasoning profile — system prompt, optional pinned model, output shape — that
+`AGENT_RUN(persona, task)` and `CREATE AGENT ... PERSONA '<name>'` bind to. Since v1.14.2 a persona is
+a first-class database object with its own DDL instead of a config-file entry: a persona created at
+runtime is usable immediately and survives restart. Personas are install-wide (not tenant-scoped).
+
+Seven personas are built in and seeded on first boot — `default`, `sql_developer`, `data_scientist`,
+`rust_developer`, `devops_engineer`, `marketing_expert`, `ui_ux_designer`. A built-in may be edited,
+but it stays built-in and cannot be dropped.
+
+### `CREATE PERSONA` / `CREATE OR REPLACE PERSONA`
+
+```sql
+CREATE [OR REPLACE] PERSONA <name> WITH ( key = value [, ...] );
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `system_prompt` | TEXT | *(required)* | The persona's instructions. |
+| `display_name` | TEXT | the persona name | Human-facing label. |
+| `description` | TEXT | `''` | Free-text note. |
+| `model` | TEXT | *(none)* | Pin a model. Must already be installed. Omit to inherit `[query.ai_service]`. |
+| `response_type` | TEXT | `'text'` | `'text'`, `'json'` or `'code'`. |
+| `tool_enabled` | BOOL | `TRUE` | Whether runs on this persona may call tools. |
+
+```sql
+-- Minimal
+CREATE PERSONA retention_analyst
+  WITH ( system_prompt = 'You are a retention analyst. Be concise and cite numbers.' );
+
+-- Full, with a pinned model
+CREATE PERSONA compliance_reviewer WITH (
+  display_name  = 'Compliance Reviewer',
+  description   = 'Reviews transactions against policy',
+  system_prompt = 'You are a compliance reviewer. Quote the policy clause you rely on.',
+  model         = 'qwen2.5-coder:7b',
+  response_type = 'json',
+  tool_enabled  = TRUE
+);
+```
+
+An unknown option key is rejected at parse time, and `system_prompt` is required — `CREATE PERSONA p
+WITH ( display_name = 'P' )` errors with `CREATE PERSONA requires system_prompt = '<string>'`.
+Creating a name that already exists errors unless `OR REPLACE` is given; `OR REPLACE` is a **full
+rewrite** (keys you omit revert to their defaults) that preserves `created_at` and the built-in flag.
+
+Commas inside a quoted value are safe, and a literal single quote is escaped by doubling it:
+
+```sql
+CREATE OR REPLACE PERSONA docs_writer WITH (
+  system_prompt = 'First, do no harm. Use the user''s schema.',
+  description   = 'Writes SQL, only SQL'
+);
+```
+
+> **A pinned model must be installed (v1.14.2).** `model = 'typo-not-installed:7b'` is rejected at DDL
+> time with the list of installed models and a pointer to `PULL_MODEL('...')`, instead of failing
+> later inside an agent loop. The check is skipped only when no model registry can be resolved.
+
+### `ALTER PERSONA`
+
+```sql
+ALTER PERSONA <name> SET ( key = value [, ...] );
+```
+
+Edits only the keys named (the same six keys as `CREATE PERSONA`; at least one is required). Setting
+`model` to the empty string clears the pin and restores "inherit the configured default".
+
+```sql
+ALTER PERSONA retention_analyst SET ( system_prompt = 'Answer in at most three sentences.' );
+ALTER PERSONA retention_analyst SET ( model = 'qwen2.5-coder:7b', response_type = 'json' );
+ALTER PERSONA retention_analyst SET ( model = '' );          -- back to the config default
+ALTER PERSONA retention_analyst SET ( tool_enabled = false );
+```
+
+### `DROP PERSONA`
+
+```sql
+DROP PERSONA [IF EXISTS] <name>;
+```
+
+`IF EXISTS` makes the drop idempotent (`Persona 'x' does not exist, skipping (IF EXISTS)`). A built-in
+persona cannot be dropped (`cannot drop built-in persona 'sql_developer'`). Dropping does not rewrite
+agents that reference the persona: the drop succeeds and the dependent agent keeps a dangling
+binding, which `DESCRIBE AGENT` reports as `persona_resolved = false`. A new `CREATE AGENT` naming an
+unknown persona is refused — repoint or drop dependent agents first.
+
+### `SHOW PERSONAS` / `DESCRIBE PERSONA`
+
+```sql
+SHOW PERSONAS;                         -- persona_name, display_name, model, tool_enabled, is_builtin
+SHOW PERSONAS LIKE 'retention%';
+DESCRIBE PERSONA retention_analyst;    -- (property, value) rows, including the full system_prompt
+```
+
+`model` comes back `NULL` in `SHOW PERSONAS` (and `(config default)` in `DESCRIBE PERSONA`) when no
+model is pinned. The `LIKE` pattern uses `%` as the wildcard and is **unanchored** — `LIKE 'gate'`
+matches `docgate_analyst` exactly as `'%gate%'` does.
+
+---
+
+## Durable-agent activation control (v1.14.2+)
+
+Durable agents (`CREATE AGENT`, v1.9.0+) fire on a cron schedule and/or on committed DML events.
+v1.14.2 adds two ways to drive them from a pipeline.
+
+### `WAKE AGENT` — fire now, asynchronously
+
+```sql
+WAKE AGENT <name>;
+```
+
+Enqueues an immediate run on the background dispatcher and returns at once
+(`Agent 'stage2_summarizer' woken (queued)`) — the LLM loop never runs inside your request. This is
+the async counterpart to `EXECUTE AGENT`, which runs the loop synchronously and returns its output.
+Use it to hand off between pipeline stages without waiting for a cron tick.
+
+The agent must exist and be **enabled**; waking a disabled agent errors with
+`Agent '<name>' is disabled (ALTER AGENT <name> ENABLE to wake it)`. The queued run shows up in
+`_system_agent_runs` with `activation = schedule 'manual-wake'` once the dispatcher drains it:
+
+```sql
+WAKE AGENT stage2_summarizer;
+
+SELECT started_at, status, output
+FROM _system_agent_runs
+WHERE agent_name = 'stage2_summarizer'
+LIMIT 5;
+```
+
+A user-issued wake is enqueued at cascade hop 0 — it starts a fresh chain rather than continuing one.
+
+### `ALLOW AGENT ORIGIN` — let one agent's write fire another
+
+```sql
+CREATE AGENT <name> PERSONA '<persona>' TASK '<task>'
+  ON {INSERT|UPDATE|DELETE} {INTO|ON|FROM} <table> [WHERE <expr>] ALLOW AGENT ORIGIN
+  [WITH ( ... )];
+```
+
+This is a **suffix on an event binding**, not a statement of its own. By default a write made inside
+an agent's run never re-fires any event binding — the cascade suppression that stops an
+`allow_writes` agent from looping on its own `INSERT`. `ALLOW AGENT ORIGIN` opts that one binding in,
+so agents can be chained into a pipeline:
+
+```sql
+-- Stage 2 fires when stage 1's agent marks a row VALIDATED
+CREATE AGENT stage2_summarizer
+  PERSONA 'retention_analyst'
+  TASK 'Summarize the validated row.'
+  ON UPDATE ON doc_queue WHERE stage = 'VALIDATED' ALLOW AGENT ORIGIN
+  WITH ( max_iterations = 2, timeout_seconds = 120 );
+```
+
+Two guards always remain in force: a binding never fires on **its own** agent's write (no self-loop),
+and a chain is capped at **5 hops**, so even a mis-declared `A → B → A` cycle halts. Ordinary user
+writes fire the binding at hop 0 whether or not the suffix is present.
+
+Place the suffix after the optional `WHERE`; the predicate is cut at the suffix, so the binding above
+stores its predicate as `stage = 'VALIDATED'`. `SHOW AGENTS` and `DESCRIBE AGENT` do not currently
+display the flag — the binding line shows only the op, table and `WHERE`.
 
 ---
 
