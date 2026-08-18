@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.14.2-ce` on 2026-08-10
+    **Last synced from**: `v1.14.3-ce` on 2026-08-18
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -37,6 +37,12 @@ The features below are AIDB-specific extensions that distinguish AIDB SQL from g
 | Persona inspection           | `SHOW PERSONAS [LIKE '...']`, `DESCRIBE PERSONA name` (v1.14.2+)       |
 | Fire a durable agent async   | `WAKE AGENT name` (v1.14.2+)                                          |
 | Agent-to-agent chaining      | `... ON INSERT INTO t ALLOW AGENT ORIGIN` (v1.14.2+)                   |
+| Persistent agent memory      | `CREATE MEMORY name IDENTITY user_id` (v1.14.3+)                       |
+| Write a memory               | `REMEMBER mem FOR user_id = 123 '<text>'` (v1.14.3+)                   |
+| Read assembled context       | `RECALL mem FOR user_id = 123 ABOUT '<query>'` (v1.14.3+)              |
+| Authoritative present value  | `CURRENT mem FOR user_id = 123 ATTRIBUTE attr` (v1.14.3+)              |
+| Explain a remembered value   | `TRACE mem FOR user_id = 123 ATTRIBUTE attr` (v1.14.3+)                |
+| Authorized removal           | `FORGET mem FOR user_id = 123 ABOUT '<scope>'` (v1.14.3+)              |
 
 ---
 
@@ -71,6 +77,37 @@ Scalar: `BOOLEAN`, `SMALLINT`, `INTEGER`, `BIGINT`, `REAL`, `DOUBLE`, `DECIMAL(p
 Multimedia: `AUDIO`, `VIDEO`, `IMAGE`, `PDF`.
 
 **Column constraints:** `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK (expr)`, `DEFAULT expr`, `REFERENCES other_table(other_col)`.
+
+**Constraint enforcement.** `PRIMARY KEY`, `UNIQUE` and `CHECK (expr)` are enforced on write —
+a violating statement errors and no row is persisted. Since **v1.14.3**:
+
+* `CHECK` is enforced on `UPDATE` as well as `INSERT` and `INSERT ... SELECT`
+  (before v1.14.3, `UPDATE` skipped it, so a row could be inserted legally and
+  then updated into a state the constraint forbids);
+* a **table-level** `CHECK`, written after the column list, is enforced too:
+
+  ```sql
+  CREATE TABLE scores (
+      score INTEGER,
+      CONSTRAINT score_non_negative CHECK (score >= 0)
+  );
+
+  INSERT INTO scores (score) VALUES (-5);
+  -- ERROR: Table CHECK constraint 'score_non_negative' violated (row 1)
+  ```
+
+  (before v1.14.3 a table-level `CHECK` parsed, was accepted, and then enforced
+  nothing — only inline column `CHECK`s did anything);
+* a `CHECK` survives a restart; it used to be dropped when the schema was
+  reloaded from the on-disk cache.
+
+`NULL` follows SQL three-valued logic: a `CHECK` rejects a row only when the
+predicate evaluates to `FALSE`. `CHECK (grade IN ('A','B'))` therefore **accepts**
+a `NULL` grade, because the predicate is `UNKNOWN`. Add `NOT NULL` if you want to
+forbid that.
+
+Table-level `PRIMARY KEY (...)` / `UNIQUE (...)` (declared after the column list
+rather than inline on the column) are still not enforced — declare those inline.
 
 **Worked example — table with a vector column for semantic search:**
 
@@ -113,7 +150,9 @@ INSERT INTO audit_log (id, actor, action) VALUES (1, 'alice', 'LOGIN');
 
 -- UPDATE and DELETE are refused on an immutable table.
 
-VERIFY TABLE audit_log;          -- -> is_valid BOOL, message TEXT     (v1.12.0+)
+-- -> is_valid BOOL, message TEXT, status TEXT,
+--    records_verified INT, blocks_verified INT   (v1.12.0+; status/counts v1.14.2.1+)
+VERIFY TABLE audit_log;
 VERIFY RECORD 1 IN audit_log;    -- -> record_id, is_valid, message    (v1.12.0+)
 ```
 
@@ -125,6 +164,18 @@ checksum, each sealed block's checksum and merkle root, and each block-to-block 
 then cross-checks the number of chained records against the rows actually stored.
 `message` reports the number of records/blocks verified, or the first break found.
 `VERIFY TABLE` on a table that is **not** immutable returns an error rather than a pass.
+
+Read the counts from `records_verified` / `blocks_verified` rather than parsing `message`,
+and branch on `status`, not on `is_valid` alone:
+
+| `status` | `is_valid` | meaning |
+|---|---|---|
+| `verified` | `true` | the chain was walked and every record in it is attested (`records_verified` > 0) |
+| `empty` | `true` | the chain holds **zero** records — the check is **vacuous**, nothing was attested. An empty chain is internally consistent, so `is_valid` stays `true`; it is *not* evidence of tampering, it usually means nothing was ever written |
+| `failed` | `false` | at least one integrity problem was found; `message` names the first one |
+
+A pipeline that claims "N/N runs verified" must therefore require
+`status = 'verified'` **and** `records_verified > 0`.
 
 `VERIFY RECORD <id> IN <t>` attests a single record: it recomputes that record's
 checksum and proves its membership in its block's merkle tree. `<id>` is the row's SQL
@@ -164,11 +215,20 @@ on disk. Requirements and behavior:
 
 ```sql
 INSERT INTO t [(c1, c2, ...)] VALUES (v1, v2, ...), ...;
+INSERT INTO t [(c1, c2, ...)] SELECT ...;
 
 UPDATE t SET c1 = v1, c2 = v2 [WHERE condition];
 
 DELETE FROM t [WHERE condition];
 ```
+
+**`rows_affected` is the number of rows actually written.** For
+`INSERT ... SELECT` whose `SELECT` matches nothing, `rows_affected` is `0` — so a
+client can detect a no-op. (Before **v1.14.3** one entry point reported `1` for
+that case, because it counted the result envelope instead of the write; the
+count is now consistent across every entry point.) The same rule holds for
+`UPDATE` and `DELETE`: a statement whose `WHERE` matches no row reports `0`,
+which is what makes a conditional `UPDATE` usable as an atomic claim.
 
 **Worked example — populate a vector column from text using `EMBED`:**
 
@@ -602,18 +662,30 @@ embedded `local` provider — the v1.8 default — or Ollama / OpenAI / Anthropi
 | `model` | TEXT | persona / config | Override the model for this call (v1.8.10+). Outranks the persona and config default; an uninstalled name errors. |
 | `max_iterations` | INT | `5` | ReAct tool-call cap. Clamped to `1..10`. |
 | `timeout_ms` | INT | `600000` | Wall-clock budget. Clamped to `1000..600000`. |
+| `allow_unknown_persona` | BOOL | `FALSE` | v1.14.3+. Run on the engine's `default` persona when `persona` does not exist, instead of erroring. |
 
 Out-of-range numbers are **clamped**, not rejected — failing a long agentic query on a knob is worse
 than capping it. Unknown option keys **are** an error, so typos surface immediately.
 
+> **The persona must exist — v1.14.3 breaking change.** `AGENT_RUN('does-not-exist', …)` now fails
+> with `AGENT_RUN: unknown persona '<name>'. Available: …`, matching what `CREATE AGENT` has done
+> since v1.14.2. Earlier builds logged a warning and silently ran the request on the built-in
+> `default` persona — which is *conversational*, so an unattended agent answered in prose instead of
+> calling its tools and returned plausible-looking wrong output. Create the persona
+> (`CREATE PERSONA`, below), name a built-in, or pass
+> `json_object('allow_unknown_persona', true)` to opt back into the fallback deliberately.
+
 > **`allow_writes` is rejected — the agent's database tools are always read-only from SQL.** A
 > per-query flag would let any authenticated caller escalate a read-only agent into a writing one.
 > Write capability is declared once by an operator on a durable agent (`CREATE AGENT`, v1.9.0), never
-> per query.
+> per query. `allow_unknown_persona` is different: it grants no capability, so SQL may set it.
 
-Returns `NULL` only when no agent service is wired (i.e. the AI service is not configured); every
-other failure returns a `TEXT` value prefixed `AGENT_RUN error:` so it survives `COALESCE` in a
-procedure body while remaining greppable.
+Returns `NULL` only when no agent service is wired (i.e. the AI service is not configured); a *run*
+that fails (the ReAct loop errors, the model times out) returns a `TEXT` value prefixed
+`AGENT_RUN error:` so it survives `COALESCE` in a procedure body while remaining greppable. A bad
+**argument** — a non-string persona or task, an unknown option key, or (v1.14.3+) a persona that does
+not exist — fails the statement instead: it is a mistake in the SQL, and burying it in a result cell
+is exactly the silent degrade v1.14.3 removed.
 
 ```sql
 -- Aggregation + reasoning
@@ -625,7 +697,9 @@ SELECT AGENT_RUN('aidb-assistant',
 SELECT AGENT_RUN('aidb-assistant', 'Investigate the slowest query',
                  json_object('max_iterations', 3, 'timeout_ms', 60000)) AS reply;
 
--- Composed in a CTE
+-- Composed in a CTE. 'returns-triage' is NOT a built-in: create it first
+-- (CREATE PERSONA, below), or this statement errors with
+-- "AGENT_RUN: unknown persona 'returns-triage'" (v1.14.3+).
 WITH triaged AS (
   SELECT order_id,
          AGENT_RUN('returns-triage',
@@ -644,9 +718,22 @@ A persona is the reasoning profile — system prompt, optional pinned model, out
 a first-class database object with its own DDL instead of a config-file entry: a persona created at
 runtime is usable immediately and survives restart. Personas are install-wide (not tenant-scoped).
 
-Seven personas are built in and seeded on first boot — `default`, `sql_developer`, `data_scientist`,
-`rust_developer`, `devops_engineer`, `marketing_expert`, `ui_ux_designer`. A built-in may be edited,
-but it stays built-in and cannot be dropped.
+Eight personas are built in and seeded on first boot — `default`, `sql_developer`, `data_scientist`,
+`rust_developer`, `devops_engineer`, `marketing_expert`, `ui_ux_designer`, and `aidb-assistant` (the
+one the AI-chat UI and the `AGENT_RUN` examples above use). A built-in may be edited, but it stays
+built-in and cannot be dropped. `SHOW PERSONAS` lists exactly what this engine has.
+
+Any other name — including every persona in an example you copy from a blog post or a recipe — must
+be created first. Both surfaces **reject** an unknown persona with `unknown persona '<name>'`:
+`CREATE AGENT` since v1.14.2, and `AGENT_RUN` since v1.14.3. Each offers the same deliberate escape
+hatch — `WITH (allow_unknown_persona = TRUE)` on `CREATE AGENT`,
+`json_object('allow_unknown_persona', true)` in `AGENT_RUN`'s options — which restores the old
+behaviour of running on the built-in `default` persona.
+
+> **Upgrading from v1.14.2 or earlier:** an `AGENT_RUN` call naming a persona nobody created used to
+> succeed with a warning in the log. It now errors. That is the point: the `default` persona is
+> conversational, and substituting it for a task-shaped one produced answers that read fine and did
+> not do the work.
 
 ### `CREATE PERSONA` / `CREATE OR REPLACE PERSONA`
 
@@ -660,8 +747,20 @@ CREATE [OR REPLACE] PERSONA <name> WITH ( key = value [, ...] );
 | `display_name` | TEXT | the persona name | Human-facing label. |
 | `description` | TEXT | `''` | Free-text note. |
 | `model` | TEXT | *(none)* | Pin a model. Must already be installed. Omit to inherit `[query.ai_service]`. |
-| `response_type` | TEXT | `'text'` | `'text'`, `'json'` or `'code'`. |
+| `response_type` | TEXT | `'text'` | `'text'`, `'markdown'`, `'json'` or `'code'`. |
 | `tool_enabled` | BOOL | `TRUE` | Whether runs on this persona may call tools. |
+
+`<name>` is a SQL identifier. Use a **delimited** (double-quoted) identifier when the name carries a
+character a bare identifier cannot — the quotes are not part of the stored name, and a doubled `""`
+inside means one literal `"`:
+
+```sql
+CREATE PERSONA "aidb-assistant" WITH ( system_prompt = 'You are a database task executor.' );
+DESCRIBE PERSONA "aidb-assistant";      -- resolves to the persona named aidb-assistant
+```
+
+> **Fixed in v1.14.2.1.** Earlier builds stored the quotes verbatim, so `CREATE PERSONA "x-y"` created
+> a persona literally named `"x-y"` that no later statement could address.
 
 ```sql
 -- Minimal
@@ -716,26 +815,352 @@ ALTER PERSONA retention_analyst SET ( tool_enabled = false );
 ### `DROP PERSONA`
 
 ```sql
-DROP PERSONA [IF EXISTS] <name>;
+DROP PERSONA [IF EXISTS] <name> [CASCADE];
 ```
 
 `IF EXISTS` makes the drop idempotent (`Persona 'x' does not exist, skipping (IF EXISTS)`). A built-in
-persona cannot be dropped (`cannot drop built-in persona 'sql_developer'`). Dropping does not rewrite
-agents that reference the persona: the drop succeeds and the dependent agent keeps a dangling
-binding, which `DESCRIBE AGENT` reports as `persona_resolved = false`. A new `CREATE AGENT` naming an
-unknown persona is refused — repoint or drop dependent agents first.
+persona cannot be dropped (`cannot drop built-in persona 'sql_developer'`).
+
+Since **v1.14.2.1** the drop is also refused while a durable agent still binds to the persona, so a
+`DROP` can no longer silently orphan an agent:
+
+```
+Cannot drop persona 'retention_analyst' because 2 agent(s) depend on it:
+acme/churn_watcher, acme/renewal_bot. Repoint or drop those agents first, or use
+DROP PERSONA retention_analyst CASCADE to drop it anyway ...
+```
+
+Dependents are listed as `tenant/agent`, and the scan covers **every** tenant (personas are
+install-wide). Repoint or drop those agents first — a new `CREATE AGENT` naming an unknown persona is
+refused too. If the agent store cannot be read at all, the check is skipped rather than blocking the
+drop.
+
+`CASCADE` forces the drop. It does **not** delete the dependent agents; it only waives the refusal,
+and they are left with a dangling binding that `DESCRIBE AGENT` reports as `persona_resolved = false`:
+
+```sql
+DROP PERSONA retention_analyst CASCADE;
+-- Persona 'retention_analyst' dropped (CASCADE) — 2 agent(s) now have a dangling
+-- persona binding: acme/churn_watcher, acme/renewal_bot
+```
 
 ### `SHOW PERSONAS` / `DESCRIBE PERSONA`
 
 ```sql
 SHOW PERSONAS;                         -- persona_name, display_name, model, tool_enabled, is_builtin
 SHOW PERSONAS LIKE 'retention%';
+SHOW PERSONAS LIKE '%gate%';           -- substring match needs wildcards on both sides
 DESCRIBE PERSONA retention_analyst;    -- (property, value) rows, including the full system_prompt
+DESCRIBE PERSONA "aidb-assistant";     -- delimited identifier for a hyphenated name
 ```
 
 `model` comes back `NULL` in `SHOW PERSONAS` (and `(config default)` in `DESCRIBE PERSONA`) when no
-model is pinned. The `LIKE` pattern uses `%` as the wildcard and is **unanchored** — `LIKE 'gate'`
-matches `docgate_analyst` exactly as `'%gate%'` does.
+model is pinned.
+
+The `LIKE` pattern is standard, **anchored** SQL `LIKE` (v1.14.2.1): `%` matches any run of
+characters, `_` matches exactly one, every other character is a literal, and the whole
+`persona_name` must match. `LIKE 'gate'` therefore matches only a persona named exactly `gate` —
+use `'%gate%'` to find `docgate_analyst`. Matching is case-sensitive.
+
+> **Changed in v1.14.2.1.** In v1.14.2 the pattern was compiled into an *unanchored* regex, so
+> `LIKE 'gate'` matched `docgate_analyst` and a pattern containing regex metacharacters (`.`, `(`,
+> `[`) was silently treated as a regex.
+
+---
+
+## Persistent agent memory (v1.14.3+)
+
+`CREATE MEMORY` gives an agent memory that survives the conversation: episodes, durable facts,
+temporal validity, relationships, provenance, and an authoritative current state — as **one**
+logical object.
+
+The rule that shapes everything below: **the engine owns the lifecycle.** An agent expresses
+intent (`REMEMBER`, `RECALL`); classification, extraction, deduplication, temporal reconciliation,
+relationship creation, provenance, indexing, consolidation, retention and cleanup are the
+database's job. You never call `CONSOLIDATE` to keep memory correct.
+
+### Creating a memory object
+
+```sql
+CREATE MEMORY customer_memory
+FOR AGENT support_agent
+IDENTITY user_id
+WITH (
+    episodic = true,
+    semantic = true,
+    temporal = true,
+    relationships = true,
+    provenance = true,
+    consolidation = 'AUTO',
+    consolidate_on_session_end = true,
+    consolidate_after_episodes = 50,
+    retain_raw_episodes = true
+);
+```
+
+Every option has a default, so `CREATE MEMORY customer_memory IDENTITY user_id;` is a complete,
+working object. `IDENTITY` is required: it names the field that scopes every read and write, and
+memory never crosses identities.
+
+The object materializes five ordinary tables, so nothing is hidden from you:
+
+| Table | Holds |
+|---|---|
+| `_mem_<name>_episodes` | raw statements — the source everything else derives from |
+| `_mem_<name>_facts`    | durable facts and attribute claims, with validity intervals |
+| `_mem_<name>_state`    | the authoritative current value per (identity, attribute) |
+| `_mem_<name>_prov`     | derivation lineage |
+| `_mem_<name>_rels`     | typed relationships (also mirrored into the tenant graph) |
+
+```sql
+SELECT attribute, value, valid_from FROM _mem_customer_memory_state WHERE identity = '123';
+```
+
+### The five verbs you actually use
+
+| Verb | Purpose |
+|---|---|
+| `REMEMBER` | persist an observation; the engine derives everything from it |
+| `RECALL`   | assemble the context relevant to a question |
+| `CURRENT`  | read the authoritative present value of one attribute |
+| `FORGET`   | explicit, authorized removal |
+| `TRACE`    | explain why a value is believed |
+
+Everything else — `CONSOLIDATE`, `RECONCILE`, `SUPERSEDE`, `HISTORY`, `SEARCH`, `RELATE`,
+`EXPLAIN MEMORY` — is optional control, never a prerequisite.
+
+### REMEMBER
+
+```sql
+REMEMBER customer_memory
+FOR user_id = 123
+'We completed the production migration from Azure to AWS yesterday because the engineering team wants Bedrock integration.';
+```
+
+One statement persists the raw episode and then derives, without any further call: the semantic
+facts, the current-state change, the closed validity interval on the old value, the relationships,
+and the provenance linking each derived record back to this sentence.
+
+The response is a JSON envelope in the `envelope` column:
+
+```json
+{
+  "status": "accepted",
+  "operation": "REMEMBER",
+  "memory": "customer_memory",
+  "identity": {"field": "user_id", "value": "123"},
+  "request_id": "req_91ac",
+  "data": {
+    "episode_id": "ep_89232",
+    "memory_ids": ["mem_1042", "mem_1043"],
+    "changes": {"episodes_created": 1, "facts_created": 1, "state_changes": 1,
+                "relationships_created": 1, "records_superseded": 1},
+    "consolidation": {"required": true, "status": "pending"}
+  },
+  "warnings": [],
+  "error": null
+}
+```
+
+`consolidation.status = "pending"` never means the episode was lost — the raw episode is committed
+*before* any derivation runs.
+
+**Works with no model configured.** A deterministic extractor always runs; the LLM pass is
+additive and degrades to the rule result on any failure. When you want certainty, state the change
+outright:
+
+```sql
+REMEMBER customer_memory FOR user_id = 123 'Now on AWS'
+  WITH (attribute = 'cloud_provider', value = 'AWS');
+```
+
+Full option list: `source_type`, `source_id`, `confidence`, `event_time`,
+`session_id`, `session_end`, `attribute`, `value`, `extract`.
+
+`source_type` sets the claim's authority, which is the first dimension of conflict resolution:
+
+```
+system_of_record > verified_user_statement > user_statement > tool_result
+                 > prior_user_statement > agent_derivation > agent_inference
+```
+
+### RECALL
+
+```sql
+RECALL customer_memory FOR user_id = 123 ABOUT 'customer deployment environment';
+```
+
+Returns current state **separately** from facts, episodes, relationships, temporal transitions and
+provenance, so a model never has to guess which similar-looking string is authoritative:
+
+```json
+{
+  "current_state": {"cloud_provider": {"value": "AWS", "confidence": 0.98,
+                                       "valid_from": "2026-08-15 14:32:00"}},
+  "semantic":  [{"memory_id": "mem_1043", "fact": "Customer prefers managed cloud services",
+                 "confidence": 0.91, "relevance": 0.77}],
+  "episodic":  [{"episode_id": "ep_89232", "event": "...", "relevance": 0.95}],
+  "relationships": [{"subject": "Customer", "predicate": "USES", "object": "AWS"}],
+  "temporal":  [{"attribute": "cloud_provider", "previous_value": "Azure",
+                 "current_value": "AWS", "changed_at": "2026-08-15 14:32:00"}],
+  "context":   {"prompt_ready": "Cloud provider is AWS. ...",
+                "estimated_tokens": 31, "truncated": false}
+}
+```
+
+Two properties worth relying on:
+
+* **Authority beats similarity.** "What cloud do we use now?" returns AWS ahead of the
+  semantically similar older Azure episode. "What did we use before AWS?" routes to temporal
+  history instead.
+* **`confidence` and `relevance` are different fields.** Confidence is evidence strength;
+  relevance is retrieval score. A highly relevant historical statement can be non-authoritative.
+
+Options: `current`, `history`, `episodes`, `facts`, `relationships`, `provenance`, `temporal`,
+`token_budget`, `prompt_ready`, `as_of`, `min_confidence`, `explain`.
+
+```sql
+RECALL customer_memory FOR user_id = 123 ABOUT 'production infrastructure'
+  WITH (current = true, history = 3, provenance = true);
+```
+
+When the token budget is exceeded, lower-priority context is truncated and `context.truncated`
+becomes `true` — but current state is preserved.
+
+### CURRENT
+
+```sql
+CURRENT customer_memory FOR user_id = 123 ATTRIBUTE subscription_plan;
+```
+
+Deterministic state lookup, never semantic search. Three outcomes:
+
+* `status = "ok"` — one accepted value, with `valid_from`, `confidence`, `authority`, and the
+  source record.
+* `status = "not_found"` — nothing recorded; `data.value` is `null`.
+* `status = "conflict"` — competing authoritative claims that authority, temporal validity and
+  confidence all failed to separate. Both claims are returned in `data.competing_claims`. **The
+  engine does not pick.** Resolve with `RECONCILE` or a higher-authority `REMEMBER`.
+
+### TRACE
+
+```sql
+TRACE customer_memory FOR user_id = 123 ATTRIBUTE cloud_provider;
+```
+
+Returns the source episode and its verbatim content, when it was recorded versus when the event
+happened, the extraction method and version, the confidence, the derivation steps, and the record
+this value superseded.
+
+### FORGET
+
+```sql
+FORGET customer_memory FOR user_id = 123 ABOUT 'home address';
+```
+
+Explicit removal only — for a user request, a retention obligation, or an administrative
+correction. **It is not the cleanup mechanism**: expiry, deduplication, compaction and
+consolidation all happen automatically without it. Removal propagates to derived facts,
+embeddings, relationships, current-state values and provenance, and the response reports the count
+per category. `WITH (mode = 'suppress')` makes records inaccessible instead of deleting them.
+
+### Consolidation is the engine's job
+
+The engine runs consolidation on its own schedule — on an episode-count threshold, a session
+boundary, elapsed age, or an idle window — with no LLM prompt, agent tool call, or application
+callback involved. A consolidation cycle retries failed extractions, collapses duplicate facts,
+re-checks contradictions, applies retention, and advances a per-identity watermark. It is
+idempotent: running it twice over an unchanged set of episodes produces no new facts.
+
+Watch it work:
+
+```sql
+SELECT memory_name, identity, pending_episodes, last_trigger, next_eligible, last_run_at
+FROM _system_memory_consolidation;
+```
+
+You *may* force a cycle — before a report, in a test, after a bulk import:
+
+```sql
+CONSOLIDATE customer_memory FOR user_id = 123;
+```
+
+but you never *have to*. If you find yourself calling it to make an answer correct, that is a bug
+worth reporting.
+
+### Giving a durable agent memory
+
+```sql
+CREATE AGENT support_bot
+PERSONA 'support_agent'
+TASK 'Answer the customer''s question.'
+WITH (
+    memory_object   = 'customer_memory',
+    memory_identity = '123',
+    memory_auto_recall   = true,   -- default
+    memory_auto_remember = true    -- default
+);
+```
+
+With this binding the runtime performs a `RECALL` **before** inference — so memory is available
+while the model reasons, not after it has answered — and a `REMEMBER` after the turn. Neither is a
+tool the model can forget to call, and the identity is fixed in the definition, so the model
+cannot address another user's memory. Exposing `REMEMBER`/`RECALL` as tools is still supported
+when an agent needs discretionary control; the two paths reach the same engine.
+
+`memory_object` and `memory_identity` must be given together — a bound object with no identity has
+no scope to operate in.
+
+### Conflicts
+
+Two contradictory claims coexist as claims until policy resolves them; evidence is never
+overwritten. Resolution considers, in order: explicit correction language, source authority,
+temporal validity, then a meaningful confidence margin. When none of them separates the claims the
+attribute is marked conflicted and both are exposed.
+
+```sql
+-- Both statements are user statements, both dated the same, and they disagree:
+CURRENT customer_memory FOR user_id = 123 ATTRIBUTE cloud_provider;
+-- => status "conflict", data.competing_claims = [{"value": "Azure", ...}, {"value": "AWS", ...}]
+
+RECONCILE customer_memory FOR user_id = 123 ATTRIBUTE cloud_provider WITH (prefer = 'AWS');
+```
+
+Set `conflict_policy = 'ALWAYS_FLAG'` to require a human for every contradiction, or
+`'LATEST_WINS'` / `'HIGHEST_CONFIDENCE'` for simpler deployments.
+
+### Identity isolation
+
+Memory reads and writes never cross identities. Over REST, a credential whose token carries a
+`memory_identity` claim is *pinned*: a request naming any other identity is refused with
+`MEMORY_ACCESS_DENIED` before any SQL is composed.
+
+**An ordinary interactive login is pinned to its own user automatically.** A client can then send
+no identity at all and have it resolved from the token — it cannot address another identity
+because it never names one.
+
+On a default CE install `/v1/auth/register` also gives each user its own tenant, and memory
+objects are tenant-scoped, so that is a second boundary already. The pin matters for the
+configuration the licensing model describes — one tenant with several users
+(`MAX_TENANTS = 1`) — where the identity is the only boundary left.
+
+Admins and API keys stay **unpinned**, deliberately: an admin needs to inspect or `FORGET` on a
+user's behalf, and a service credential serving many end users supplies the identity per request
+(the application-server pattern). If you mint your own JWTs, set `memory_identity` yourself.
+
+### REST and MCP
+
+The same contract is available over HTTP at `/v1/memory/*` and as the MCP tools
+`memory_remember`, `memory_recall`, `memory_current`, `memory_forget`, `memory_trace`. All three
+surfaces return the identical envelope, so a client never has to parse prose to learn what
+happened. The maintenance verbs are deliberately absent from MCP: memory correctness must not
+depend on an agent remembering to invoke them.
+
+```bash
+curl -sS -X POST localhost:8080/v1/memory/customer_memory/recall \
+  -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+  -d '{"identity":"123","about":"production cloud"}'
+```
 
 ---
 
@@ -797,8 +1222,25 @@ and a chain is capped at **5 hops**, so even a mis-declared `A → B → A` cycl
 writes fire the binding at hop 0 whether or not the suffix is present.
 
 Place the suffix after the optional `WHERE`; the predicate is cut at the suffix, so the binding above
-stores its predicate as `stage = 'VALIDATED'`. `SHOW AGENTS` and `DESCRIBE AGENT` do not currently
-display the flag — the binding line shows only the op, table and `WHERE`.
+stores its predicate as `stage = 'VALIDATED'`.
+
+**Reading the opt-in back (v1.14.2.1+).** The flag is auditable, not write-only: both `DESCRIBE AGENT`
+and `SHOW AGENTS` print the suffix on every binding that carries it, spelled exactly as it is
+declared, so the readback can be pasted straight back into DDL. A binding without the opt-in prints
+no suffix.
+
+```sql
+DESCRIBE AGENT stage2_summarizer;
+-- property   | value
+-- Bindings   | UPDATE ON doc_queue WHERE stage = 'VALIDATED' ALLOW AGENT ORIGIN
+
+SHOW AGENTS;
+-- name               | persona            | bindings                              | state   | tokens_today
+-- stage2_summarizer  | retention_analyst  | UPDATE ON doc_queue ALLOW AGENT ORIGIN | enabled | 0
+```
+
+(The `SHOW AGENTS` summary stays compact — it omits the `WHERE` predicate but still shows the
+cascade opt-in. Use `DESCRIBE AGENT` for the full binding.)
 
 ---
 
