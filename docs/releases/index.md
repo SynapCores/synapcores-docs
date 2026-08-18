@@ -24,6 +24,7 @@ Release artifacts (binaries + SHA-256 sidecars + the install script) live on the
 
 | Version | Date | Headline |
 |---|---|---|
+| [**v1.14.3-ce**](v1.14.3-ce.md) | 2026-08-18 | Persistent agent memory — `CREATE MEMORY` makes multi-turn agent memory a database object (identity-scoped, authority-resolved conflicts, engine-side consolidation); plus cloud LLM providers (`anthropic`/`gemini`) now work for SQL `GENERATE()`, not just the REST endpoints |
 | [**v1.14.2-ce**](v1.14.2-ce.md) | 2026-08-10 | Agentic reliability — durable agents stateless by default, personas as first-class objects, honest run audit; plus three index-maintenance fixes that returned silently wrong results |
 | [**v1.14.1.1-ce**](v1.14.1.1-ce.md) | 2026-08-07 | Critical patch — explicit-projection NULL reads, oversized-prompt gateway abort, and Llama-model agentic abort all fixed |
 | [**v1.14.1-ce**](v1.14.1-ce.md) | 2026-08-06 | MongoDB Data Sync — replicate a Mongo collection into a queryable SQL table (`_id`→PK, nested fields→JSON); data sync on by default; graph queries ~20× faster |
