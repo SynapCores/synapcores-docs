@@ -24,6 +24,7 @@ Release artifacts (binaries + SHA-256 sidecars + the install script) live on the
 
 | Version | Date | Headline |
 |---|---|---|
+| [**v1.14.5-ce**](v1.14.5-ce.md) | 2026-08-23 | Agent event bindings survived concurrency at last — a user write committing during any agent run silently lost its binding (0/2 in-flight before, 2/2 after); recipes executed against the master store instead of the tenant's; reloading any UI page froze for up to 30 minutes on a busy gateway |
 | [**v1.14.4-ce**](v1.14.4-ce.md) | 2026-08-21 | Ten fixes for failures that looked like success — an indexed `AND` returned rows the `WHERE` excluded (no error raised), index definitions did not survive a restart, and the installer wrote a 30s query timeout that made `GENERATE()` fail on CPU-only hosts; plus six interface fixes |
 | [**v1.14.3-ce**](v1.14.3-ce.md) | 2026-08-18 | Persistent agent memory — `CREATE MEMORY` makes multi-turn agent memory a database object (identity-scoped, authority-resolved conflicts, engine-side consolidation); plus cloud LLM providers (`anthropic`/`gemini`) now work for SQL `GENERATE()`, not just the REST endpoints |
 | [**v1.14.2-ce**](v1.14.2-ce.md) | 2026-08-10 | Agentic reliability — durable agents stateless by default, personas as first-class objects, honest run audit; plus three index-maintenance fixes that returned silently wrong results |
