@@ -260,11 +260,30 @@ than none, because a lookup that misses it would silently return no row.
 `CREATE UNIQUE INDEX` over data that already contains a duplicate fails, naming
 the column and the repeated value.
 
-!!! warning "Before v1.15.0-ce"
-    `CREATE INDEX` returned success without building anything, so no secondary
-    index ever accelerated a query — a point lookup on an indexed non-primary-key
-    column still cost a full table scan. Indexes created on an older build are
-    rebuilt on first use after upgrading.
+!!! warning "Before v1.15.0-ce: two ways an index ended up empty"
+    `CREATE INDEX` did not read the table — it relied entirely on INSERT-time
+    maintenance. So an index created over a table that **already held rows** was
+    left empty, and a lookup on it silently fell back to a full table scan
+    (correct answers, no acceleration, no error).
+
+    Separately, INSERT-time index maintenance was gated on the table's
+    *constraint* list rather than its index catalog, so on a table with **no
+    `PRIMARY KEY` and no `UNIQUE` column** even rows inserted *after* the index
+    existed never reached it.
+
+    An index on a table that had a `PRIMARY KEY` or `UNIQUE` column and was
+    created **before** the rows were loaded worked correctly on earlier
+    versions. Measured on v1.14.5-ce, 20k rows, same box:
+
+    | scenario | v1.14.5-ce |
+    |---|---|
+    | PK table, index created before the load | 1.0 ms |
+    | PK table, index created after the load | 66.6 ms |
+    | no-PK table, index created before the load | 66.3 ms |
+    | unindexed column (control) | 72.1 ms |
+
+    Indexes created on an older build are registered but may be empty;
+    `CREATE INDEX ... IF NOT EXISTS` on this version backfills them.
 
 **Indexes belong to the database that created them.** An index created in
 database `analytics` is used only by queries running against `analytics`.
