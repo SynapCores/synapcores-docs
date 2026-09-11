@@ -78,6 +78,17 @@ Multimedia: `AUDIO`, `VIDEO`, `IMAGE`, `PDF`.
 
 **Column constraints:** `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK (expr)`, `DEFAULT expr`, `REFERENCES other_table(other_col)`.
 
+**Table constraints:** `PRIMARY KEY (a, b)` — including the composite form — is
+honoured as of v1.15.0-ce, and creates both the primary key and its index.
+Out-of-line `UNIQUE (...)` and `FOREIGN KEY (...)` are parsed but not yet
+enforced; declare those at the column level.
+
+!!! warning "Before v1.15.0-ce"
+    A table-level `PRIMARY KEY (a, b)` was accepted and then silently discarded:
+    `SHOW INDEXES` returned nothing and the table had no primary key at all. If
+    you have tables declared that way, re-running their `CREATE TABLE ... IF NOT
+    EXISTS` on this version registers and backfills the missing index.
+
 **Constraint enforcement.** `PRIMARY KEY`, `UNIQUE` and `CHECK (expr)` are enforced on write —
 a violating statement errors and no row is persisted. Since **v1.14.3**:
 
@@ -152,6 +163,58 @@ CREATE TABLE products (
 );
 ```
 
+### Columnar tables — `ENGINE = SYNAPCORES_COLUMNAR` *(v1.15.0-ce+)*
+
+Stores the table as Parquet parts with RocksDB metadata instead of row storage.
+Built for analytical scans over large tables: a query reads only the columns it
+names, and row-group statistics skip parts that cannot match.
+
+```sql
+CREATE TABLE events (
+    id      INTEGER PRIMARY KEY,
+    sensor  TEXT,
+    reading DOUBLE,
+    ts      TIMESTAMP
+) ENGINE = SYNAPCORES_COLUMNAR;
+```
+
+`ENGINE = SYNAPCORES_COLUMNAR` is the whole syntax — it takes no further
+options. Adding a trailing option (`, COMPRESSION = 'zstd'`, `, CHECKSUM = …`,
+`, BLOCK_SIZE = …`) is a **parse error**, and a `WITH ( … )` clause on
+`CREATE TABLE` must not be used at all: it silently retypes every column to
+`TEXT` and discards the primary key.
+
+!!! warning "`PRIMARY KEY` and `UNIQUE` are NOT enforced on columnar tables"
+    On a columnar table a `PRIMARY KEY` or `UNIQUE` declaration is a
+    clustering and metadata hint. **Duplicate keys are accepted** — the insert
+    succeeds and both rows are stored.
+
+    This follows the analytical-store convention: Snowflake, BigQuery, Amazon
+    Redshift, ClickHouse, Apache Iceberg and Delta Lake all allow the
+    declaration without enforcing it, because a uniqueness probe on every
+    insert removes the bulk-ingest advantage that is the reason to use
+    columnar storage at all. BigQuery makes you write `NOT ENFORCED`
+    explicitly.
+
+    **A row-storage table in this engine DOES enforce it.** The same
+    statement therefore behaves differently depending on `ENGINE`, so
+    `CREATE TABLE` emits a warning when a columnar table declares one.
+
+    If you need uniqueness: de-duplicate at ingest, or use a row table for
+    the keyed data and a columnar table for the analytical copy.
+
+
+
+Columnar tables support the full `INSERT` / `UPDATE` / `DELETE` surface. Writes
+are copy-on-write — an affected part is rewritten rather than edited in place,
+which is why an `UPDATE` or `DELETE` touching a large part costs more than the
+same statement against a row table. Prefer batched writes and analytical reads.
+
+!!! note "Before v1.15.0-ce"
+    `ENGINE = SYNAPCORES_COLUMNAR` parsed and was then normalised away, so the
+    table was silently created as a row table. Tables created that way are row
+    tables and stay row tables; recreate them to move to columnar storage.
+
 ### ALTER TABLE / DROP TABLE / CREATE INDEX / DROP INDEX
 
 ```sql
@@ -168,6 +231,43 @@ CREATE [UNIQUE] INDEX [IF NOT EXISTS] idx_name ON t (col [ASC|DESC], ...) [USING
 CREATE [UNIQUE] INDEX [IF NOT EXISTS] idx_name ON t USING BTREE|HASH (col [ASC|DESC], ...);
 DROP   INDEX [IF EXISTS] idx_name;
 ```
+
+**Index types.** `BTREE` (the default) and `HASH` are the only implemented
+types. Both clause orders are accepted since v1.15.0-ce — `USING` before the
+column list (PostgreSQL style) and after it (MySQL style). Earlier versions
+rejected the trailing form with a parse error.
+
+`USING HNSW` and `USING IVFFLAT` are **rejected**. There is no SQL-level vector
+index. For similarity search use `COSINE_SIMILARITY`, which scans, or the
+dedicated vector-collection REST surface (`POST /v1/vectors/collections`).
+
+An index on a `VECTOR(N)` column with no `USING` clause is also **rejected**: a
+B-tree over an embedding accelerates nothing, and creating one silently would
+leave a table that looks indexed and behaves as though it is not.
+
+**`CREATE INDEX` builds the index from the rows already in the table.** It
+therefore takes time proportional to table size and reports how much it did:
+
+```
+Index idx_zip created on table zip_crosswalk (B-tree); 189361 rows indexed
+```
+
+Rows holding `NULL` in an indexed column are skipped and counted separately —
+they can never satisfy an equality lookup. If the build fails, the statement
+fails and **the index is not created**; a half-populated index would be worse
+than none, because a lookup that misses it would silently return no row.
+
+`CREATE UNIQUE INDEX` over data that already contains a duplicate fails, naming
+the column and the repeated value.
+
+!!! warning "Before v1.15.0-ce"
+    `CREATE INDEX` returned success without building anything, so no secondary
+    index ever accelerated a query — a point lookup on an indexed non-primary-key
+    column still cost a full table scan. Indexes created on an older build are
+    rebuilt on first use after upgrading.
+
+**Indexes belong to the database that created them.** An index created in
+database `analytics` is used only by queries running against `analytics`.
 
 **Supported index types: `BTREE` (default) and `HASH`.**
 
@@ -587,6 +687,27 @@ Notes:
 * Not supported with aggregates / `GROUP BY` (list the columns instead), and
   `COUNT(t.*)` is rejected — use `COUNT(*)` or `COUNT(t.<column>)`.
 
+**Qualified wildcards** — `SELECT t.*` — are supported as of v1.15.0-ce, and are
+the way to take one relation's columns out of a join:
+
+```sql
+SELECT o.*            FROM orders o JOIN customers c ON o.cust_id = c.id;
+SELECT o.*, c.name    FROM orders o JOIN customers c ON o.cust_id = c.id;
+```
+
+The qualifier may be an alias, a table name, or a database-qualified name
+(`analytics.orders.*`). Where a relation has an alias, either spelling resolves
+to it. `t.*` returns exactly the subset of `SELECT *` belonging to `t`, in the
+same order.
+
+An unknown qualifier is an error naming what is in scope, and a qualifier
+matching two relations (a self-join) is an ambiguity error asking you to use the
+alias — neither silently guesses. `COUNT(t.*)` is rejected: it is not the same
+aggregate as `COUNT(*)` once an outer join is involved, so it is refused rather
+than answered with a different number.
+
+Earlier versions rejected `t.*` outright with `Complex projections not supported`.
+
 ### Joins, CTEs, subqueries
 
 ```sql
@@ -757,6 +878,24 @@ Higher-level helpers used inside `SEMANTIC JOIN` and multi-modal queries. Prefer
 ### Other built-in AI functions
 
 `CLASSIFY(text, categories)`, `EXTRACT_ENTITIES(text)`, `SENTIMENT(text)`, `SUMMARIZE(text)`, `TRANSLATE(text, target_lang)`.
+
+### `TRANSCRIBE(path [, language])` — *Enterprise only*
+
+```sql
+SELECT TRANSCRIBE('/data/media/call.wav')        AS text;
+SELECT TRANSCRIBE('/data/media/call.wav', 'en')  AS text;
+```
+
+Speech-to-text over an audio file on the server, returning `TEXT`.
+
+!!! warning "Not available in Community Edition"
+    Community builds ship no speech-to-text engine. `TRANSCRIBE()` there returns
+    an error stating that the Enterprise transcription feature is absent or that
+    no Whisper model is configured under `[transcription]`. It fails loudly and
+    never returns a partial or empty transcript.
+
+    Before v1.15.0-ce the function was missing from the parser's function
+    allowlist, so it answered `Unknown function: transcribe` on every edition.
 
 ### `MEMORY_STORE(namespace, content [, metadata [, options]])` — *v1.8.5+ (`options`: v1.8.9+)*
 
