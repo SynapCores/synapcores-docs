@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.14.5-ce` on 2026-08-23
+    **Last synced from**: `v1.15.0-ce` on 2026-09-11
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -106,8 +106,38 @@ predicate evaluates to `FALSE`. `CHECK (grade IN ('A','B'))` therefore **accepts
 a `NULL` grade, because the predicate is `UNKNOWN`. Add `NOT NULL` if you want to
 forbid that.
 
-Table-level `PRIMARY KEY (...)` / `UNIQUE (...)` (declared after the column list
-rather than inline on the column) are still not enforced — declare those inline.
+**Out-of-line `PRIMARY KEY`, including the composite form, is honoured since
+v1.15.0-ce.**
+
+```sql
+CREATE TABLE zip_fips_crosswalk (
+    zip_code VARCHAR NOT NULL,
+    tract    VARCHAR NOT NULL,
+    v        VARCHAR,
+    PRIMARY KEY (zip_code, tract)
+);
+
+SHOW INDEXES FROM zip_fips_crosswalk;
+-- PRIMARY                (zip_code, tract)
+-- zip_fips_crosswalk_pkey (zip_code, tract)
+
+INSERT INTO zip_fips_crosswalk VALUES ('10001', 'A', 'x');
+INSERT INTO zip_fips_crosswalk VALUES ('10001', 'A', 'y');
+-- ERROR: Duplicate key: row violates a UNIQUE or PRIMARY KEY constraint
+```
+
+Before v1.15.0-ce that `CREATE TABLE` returned **ok** and then produced no primary
+key, no index and no error — `SHOW INDEXES` came back empty. A single-column
+out-of-line `PRIMARY KEY (a)` behaves exactly like the inline `a ... PRIMARY KEY`
+spelling.
+
+Storage note: a table with a **single-column** primary key stores each row under
+its primary-key value, so a lookup by that key is a direct fetch. A table with a
+**composite** primary key keeps the document store's own row id, and the
+composite key is enforced through the primary key's own index instead.
+
+Out-of-line `UNIQUE (...)` and `FOREIGN KEY (...)` are still not enforced —
+declare those inline on the column.
 
 **Worked example — table with a vector column for semantic search:**
 
@@ -132,8 +162,153 @@ ALTER TABLE t ALTER COLUMN c TYPE new_type;
 
 DROP TABLE [IF EXISTS] t [CASCADE];
 
-CREATE [UNIQUE] INDEX [IF NOT EXISTS] idx_name ON t (col [ASC|DESC], ...);
+-- Both clause orders are accepted (v1.15.0-ce): the MySQL trailing order and
+-- the PostgreSQL leading order.
+CREATE [UNIQUE] INDEX [IF NOT EXISTS] idx_name ON t (col [ASC|DESC], ...) [USING BTREE|HASH];
+CREATE [UNIQUE] INDEX [IF NOT EXISTS] idx_name ON t USING BTREE|HASH (col [ASC|DESC], ...);
 DROP   INDEX [IF EXISTS] idx_name;
+```
+
+**Supported index types: `BTREE` (default) and `HASH`.**
+
+**`CREATE INDEX` builds the index from the rows already in the table (v1.15.0-ce).**
+The statement scans the table, populates the index and reports how many rows it
+indexed:
+
+```
+Index idx_zip created on table zip_crosswalk (B-tree); 189361 rows indexed
+```
+
+It therefore takes time proportional to the table size — a large table is not
+instantaneous, and that is the point. Before v1.15.0-ce the statement returned in
+milliseconds no matter how big the table was and left the index **empty**: the
+planner then fell back to a full table scan on every lookup while
+`SHOW INDEXES` listed the index and the definition survived restarts. Nothing
+reported an error.
+
+Rows whose indexed column is NULL are counted separately as skipped — such a row
+can never satisfy `col = <value>`, so leaving it out changes no answer. If the
+build fails, the statement fails and the index is **not** created: a partially
+built index would make lookups return fewer rows than the table actually holds.
+
+**`CREATE UNIQUE INDEX` over data that already contains duplicates fails
+(v1.15.0-ce)**, naming the column and the repeated value:
+
+```
+CREATE UNIQUE INDEX idx_email ON users (email);
+-- ERROR: cannot create UNIQUE index 'idx_email' on table 'users': the table
+--        already contains a DUPLICATE VALUE in the indexed column (email).
+--        The row with email = 'dupe@x.com' repeats a value an earlier row
+--        already has. De-duplicate the table first, or create a non-unique
+--        index. The index was NOT created.
+```
+
+The `UNIQUE` flag is also now recorded on every code path; one lowering
+discarded it and quietly produced a plain index, so the declared guarantee was
+present on one route and absent on the other.
+
+**`CREATE UNIQUE INDEX` also rejects duplicates written AFTER it exists
+(v1.15.0-ce).** A `UNIQUE` index is a constraint, not a hint: an INSERT whose value
+already appears in the index is rejected on every path.
+
+```
+CREATE UNIQUE INDEX idx_email ON users (email);
+INSERT INTO users (id, email) VALUES (2, 'a@x.com');   -- value already present
+-- ERROR: Duplicate key: row violates a UNIQUE or PRIMARY KEY constraint on
+--        table 'users'
+```
+
+Before v1.15.0-ce the write-time check consulted only the constraints declared in
+`CREATE TABLE`, so an index created by `CREATE UNIQUE INDEX` — which the table
+schema never learns about — enforced nothing at all. The duplicate was written,
+the index layer's own rejection was logged and discarded, and the only symptom
+was duplicated data.
+
+**Indexes are rebuilt on first use after a restart (v1.15.0-ce).** Index
+definitions are durable; the index data structures live in memory and are
+rebuilt from the table the first time a statement touches it, not at startup —
+so startup time does not grow with the size of the database, and the first
+statement against a large table pays a one-off scan (about half a second per
+10,000 rows per table in a debug build, less in a release build). Until an index
+is rebuilt it is never treated as authoritative: lookups fall back to a table
+scan and uniqueness is decided by a direct check, so results are correct
+throughout.
+
+This is the fix for a defect present through v1.14.5: after a restart every
+index was registered but empty, and the emptiness was read as an answer. A
+duplicate `INSERT` was accepted — and because a single-column `PRIMARY KEY` is
+the row's storage id, it **overwrote** the existing row with no error. The first
+write after a restart also made the empty index non-empty, after which an
+indexed lookup returned only the rows written since the restart while
+`COUNT(*)` still counted them all.
+
+If an index cannot be rebuilt — most often a `UNIQUE` index over rows that
+already contain duplicates — the engine logs the table, the index, the column
+and the offending value, leaves the index empty and unused, and keeps answering
+from table scans. `REINDEX <index>` is the recovery once the data is fixed.
+
+**An index belongs to the database that created it (v1.15.0-ce).** Each database
+keeps its own index catalog. `CREATE INDEX` issued inside `USE demo` — or with
+`"database": "demo"` on the REST call — creates an index that only `demo`'s
+queries use and that only `demo`'s rows go into.
+
+Through v1.14.5 the planner looked indexes up under the bare table name while
+every writer filed them under the database, so outside `main` no index was ever
+chosen: `CREATE INDEX` reported success, `SHOW INDEXES` listed the index, and
+every lookup still paid for a full table scan. Where `main` happened to hold a
+table of the same name, the planner picked `main`'s index for the other
+database's query. Both are fixed: an index is matched to its own database, and a
+plan naming an index from a different database is discarded in favour of a table
+scan rather than used. A 60,000-row lookup on an indexed non-key column in a
+non-`main` database went from 214 ms to 0.4 ms, matching `main`.
+
+**A composite index answers a leftmost-prefix lookup (v1.15.0-ce).** With
+`CREATE INDEX idx ON t (a, b)`, `WHERE a = ?` uses the index. Before v1.15.0-ce
+only the full key `WHERE a = ? AND b = ?` was served and any partial match
+returned **zero rows** — creating a composite index silently removed rows from
+query results. A predicate the index cannot serve (a non-leading column, or a
+partial key on a `HASH` index) falls back to a table scan and returns correct
+rows.
+
+**Vector indexes are NOT supported at SQL level.** `USING HNSW` and
+`USING IVFFLAT` parse and plan, but execution fails with an explicit error —
+there is no HNSW structure behind the SQL index layer in this release.
+`CREATE INDEX` on a `VECTOR(N)` column *without* a vector index type is also
+rejected: a B-tree over an embedding accelerates nothing, and reporting
+"(B-tree) created" for it was a silent failure that made operators believe the
+column was indexed.
+
+```sql
+-- Rejected: no HNSW behind the SQL index layer.
+CREATE INDEX i ON products(description_vec) USING HNSW;
+
+-- Also rejected: decoy B-tree over a VECTOR column.
+CREATE INDEX i ON products(description_vec);
+```
+
+For a dedicated vector store with metadata-filtered k-NN, use the vector
+collection REST subsystem:
+
+```
+POST /v1/vectors/collections            {"name": "products", "dimensions": 384, "distance_metric": "cosine"}
+POST /v1/vectors/collections/products/vectors      # insert or upsert by id
+POST /v1/vectors/collections/products/search       # supports "filter" and "threshold"
+```
+
+Note: that subsystem answers **exact** k-NN (brute force). As of v1.15.0-ce an
+`index_type` other than `"flat"` is **rejected with HTTP 400** rather than
+accepted and ignored — earlier releases echoed the requested type back in the
+response while always building a flat index. Exact search is correct, just not
+sublinear. Scope for the SQL-level fix: `docs/proposals/sql_vector_indexes.md`.
+
+Similarity SQL over a `VECTOR` column needs no index and keeps working — it is
+a full scan:
+
+```sql
+SELECT id, COSINE_SIMILARITY(description_vec, EMBED('audio gear')) AS score
+FROM products
+ORDER BY score DESC
+LIMIT 10;
 ```
 
 ### Immutable (append-only) tables and chain attestation
@@ -210,6 +385,49 @@ on disk. Requirements and behavior:
   under another database is rejected.
 
 ---
+
+
+### Columnar tables — `ENGINE = SYNAPCORES_COLUMNAR` *(v1.15.0-ce+)*
+
+```sql
+CREATE TABLE events (
+    id      INTEGER PRIMARY KEY,
+    sensor  TEXT,
+    reading DOUBLE,
+    ts      TIMESTAMP
+) ENGINE = SYNAPCORES_COLUMNAR;
+```
+
+Stores the table as Parquet parts with RocksDB metadata instead of row storage.
+A query reads only the columns it names, and row-group statistics skip parts
+that cannot match the predicate.
+
+`ENGINE = SYNAPCORES_COLUMNAR` is the entire syntax and takes no further
+options — a trailing `, COMPRESSION = …` / `, CHECKSUM = …` / `, BLOCK_SIZE = …`
+is a parse error. Do not use a `WITH ( … )` clause on `CREATE TABLE`: it
+silently retypes every column to `TEXT` and drops the primary key.
+
+Full `INSERT` / `UPDATE` / `DELETE` are supported, but writes are
+**copy-on-write**: an affected part is rewritten rather than edited in place, so
+a statement touching a large part costs more than the equivalent on a row table.
+Batch the writes; read analytically. Columnar tables have no secondary indexes —
+scanning is the access path, which is the point of the format.
+
+
+**`PRIMARY KEY` and `UNIQUE` are NOT enforced on columnar tables.** The
+declaration is a clustering/metadata hint; duplicate keys are accepted and both
+rows are stored. This follows the analytical-store convention (Snowflake,
+BigQuery, Redshift, ClickHouse, Iceberg, Delta all declare without enforcing) —
+a uniqueness probe per insert would remove the bulk-ingest advantage columnar
+exists for. **A row-storage table in this engine DOES enforce it**, so the same
+statement behaves differently depending on `ENGINE`; `CREATE TABLE` warns when a
+columnar table declares one. If you need uniqueness, de-duplicate at ingest or
+keep the keyed copy in a row table.
+
+**Before v1.15.0-ce** the `ENGINE` clause parsed and was then normalised away, so
+the statement returned ok and silently created an ordinary **row** table. A table
+created on an older build is a row table and stays one; recreate it to move to
+columnar storage.
 
 ## Data Manipulation Language (DML)
 
@@ -334,6 +552,40 @@ SELECT id,
 ```
 
 (If the alias is misspelled, the query returns a clear `unknown column` error rather than silently returning empty — fixed in v1.6.5.1.)
+
+#### Qualified wildcard — `t.*` *(v1.15.0+)*
+
+`SELECT t.*` selects every column of one relation. The qualifier may be a
+table alias, a bare table name, or schema-qualified:
+
+```sql
+SELECT emp.* FROM emp;                       -- identical to SELECT * FROM emp
+SELECT e.*   FROM emp e;                     -- by alias
+SELECT app.emp.* FROM app.emp;               -- schema-qualified
+
+-- what it exists for: one relation's columns out of a join
+SELECT e.*
+  FROM emp e
+  JOIN dept d ON e.dept_id = d.id;
+
+-- mixes with anything else
+SELECT e.*, d.dname, 1 AS lit
+  FROM emp e
+  JOIN dept d ON e.dept_id = d.id;
+```
+
+Notes:
+
+* In a join, `e.*` returns exactly the columns of `e` that `SELECT *` would
+  return for that join, with the same names. A join qualifies its right-hand
+  columns (`d.dname`), so `SELECT d.*` returns `d.id`, `d.dname` while
+  `SELECT * FROM dept` returns `id`, `dname`.
+* A qualifier that names no table or alias in the FROM clause is an error that
+  names it (`Unknown qualifier 'x' in 'x.*'`), never a silent expansion. In a
+  self-join, the shared table name is ambiguous — use the aliases
+  (`SELECT a.* FROM t a JOIN t b ...`).
+* Not supported with aggregates / `GROUP BY` (list the columns instead), and
+  `COUNT(t.*)` is rejected — use `COUNT(*)` or `COUNT(t.<column>)`.
 
 ### Joins, CTEs, subqueries
 
@@ -710,6 +962,25 @@ SELECT * FROM triaged;
 ```
 
 ---
+
+
+### `TRANSCRIBE(path [, language])` — *Enterprise only*
+
+```sql
+SELECT TRANSCRIBE('/data/media/call.wav')       AS text;
+SELECT TRANSCRIBE('/data/media/call.wav', 'en') AS text;
+```
+
+Speech-to-text over an audio file on the server, returning `TEXT`.
+
+**Community builds have no speech-to-text engine.** The call returns an explicit
+error saying the Enterprise transcription feature is absent, or that no Whisper
+model is configured under `[transcription]`. It fails loudly and never returns an
+empty or partial transcript.
+
+Before v1.15.0-ce the function was missing from the parser's function allowlist,
+so it answered `Unknown function: transcribe` on every edition — including builds
+that had the engine.
 
 ## Personas (v1.14.2+)
 
