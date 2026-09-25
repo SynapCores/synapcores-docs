@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.15.0-ce` on 2026-09-11
+    **Last synced from**: `v1.16.0-ce` on 2026-09-25
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -43,6 +43,9 @@ The features below are AIDB-specific extensions that distinguish AIDB SQL from g
 | Authoritative present value  | `CURRENT mem FOR user_id = 123 ATTRIBUTE attr` (v1.14.3+)              |
 | Explain a remembered value   | `TRACE mem FOR user_id = 123 ATTRIBUTE attr` (v1.14.3+)                |
 | Authorized removal           | `FORGET mem FOR user_id = 123 ABOUT '<scope>'` (v1.14.3+)              |
+| Query Parquet on object storage | `CREATE EXTERNAL TABLE t STORED AS PARQUET LOCATION 's3://...'` *(v1.16.0-ce+)* |
+| Re-read a lake schema        | `REFRESH EXTERNAL TABLE t` *(v1.16.0-ce+)*                             |
+| List lake tables             | `SHOW EXTERNAL TABLES` *(v1.16.0-ce+)*                                 |
 
 ---
 
@@ -75,6 +78,36 @@ Scalar: `BOOLEAN`, `SMALLINT`, `INTEGER`, `BIGINT`, `REAL`, `DOUBLE`, `DECIMAL(p
 
 **AI-native:** `VECTOR(N)` where `N` is the embedding dimension (must match the configured embedding model — default MiniLM is 384).
 Multimedia: `AUDIO`, `VIDEO`, `IMAGE`, `PDF`.
+
+**Casts.** `CAST(expr AS type)` and the `::type` shorthand both work.
+`SIGNED`, `UNSIGNED`, `SIGNED INTEGER` and `UNSIGNED INTEGER` are accepted as
+cast targets for MySQL compatibility (v1.16.0-ce) and map to `BIGINT`, so a
+query copied from MySQL — or emitted by a BI tool against the MySQL wire
+port — parses unchanged. `UNSIGNED` is a spelling only; the result is a signed
+64-bit integer.
+
+Casting **to** `DECIMAL` is accepted from any numeric or text source, but the
+precision and scale you write are **not applied**:
+
+```sql
+SELECT CAST(12.5 AS DECIMAL(10,2));     -- 12.5, exact, still scale 1
+SELECT CAST('12.5' AS DECIMAL(10,2));   -- 12.5, but APPROXIMATE (a DOUBLE)
+SELECT CAST(12 AS DECIMAL(10,2));       -- 12.0, approximate
+```
+
+A `DECIMAL` source passes through unchanged at its own scale; a `TEXT` or
+integer source becomes an approximate `DOUBLE`. So a cast is not the way to
+rescale money. Declare the column at the scale you want and let `INSERT` or
+`UPDATE` coerce to it — as of v1.16.0-ce both do, and the declared scale is
+honoured:
+
+```sql
+CREATE TABLE invoices (id INT PRIMARY KEY, amount DECIMAL(10,2));
+INSERT INTO invoices VALUES (1, 29.99);
+SELECT amount FROM invoices;            -- 29.99
+UPDATE invoices SET amount = 7.7 WHERE id = 1;
+SELECT amount FROM invoices;            -- 7.70, padded to the declared scale
+```
 
 **Column constraints:** `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK (expr)`, `DEFAULT expr`, `REFERENCES other_table(other_col)`.
 
@@ -282,8 +315,10 @@ the column and the repeated value.
     | no-PK table, index created before the load | 66.3 ms |
     | unindexed column (control) | 72.1 ms |
 
-    Indexes created on an older build are registered but may be empty;
-    `CREATE INDEX ... IF NOT EXISTS` on this version backfills them.
+    Indexes created on an older build are registered but empty. Upgrading
+    repopulates them at startup -- measured: a lookup that cost 66.6 ms on
+    v1.14.5-ce serves in 0.9 ms after opening the same data directory with
+    v1.15.0-ce, with no `CREATE INDEX` re-run.
 
 **Indexes belong to the database that created them.** An index created in
 database `analytics` is used only by queries running against `analytics`.
@@ -547,6 +582,216 @@ keep the keyed copy in a row table.
 the statement returned ok and silently created an ordinary **row** table. A table
 created on an older build is a row table and stays one; recreate it to move to
 columnar storage.
+
+### External tables — Parquet on object storage *(v1.16.0-ce+)*
+
+```sql
+CREATE EXTERNAL TABLE [IF NOT EXISTS] [db.]name [(col type [NOT NULL], ...)]
+  STORED AS PARQUET
+  LOCATION '<uri>'
+  [PARTITIONED BY (col type, ...)]
+  [WITH (CONNECTION = '<destination name>')];
+
+DROP EXTERNAL TABLE [IF EXISTS] [db.]name;
+REFRESH EXTERNAL TABLE [db.]name;
+SHOW EXTERNAL TABLES [FROM <database> | IN <database>] [LIKE '<pattern>'];
+```
+
+An **external table** is a name in the catalog pointing at a prefix in object
+storage. Nothing is copied into the database and no storage is allocated — the
+data stays where the export job wrote it, and `CREATE EXTERNAL TABLE` costs one
+Parquet footer read.
+
+What makes it worth having is that the planner treats it as an ordinary
+relation. A lake table **joins, filters and aggregates against RocksDB tables in
+one statement**, so a year of history in cheap object storage answers a question
+alongside today's live rows — with no ETL step back into the database and no
+second query engine whose results you join by hand in application code.
+
+**External tables are read-only.** `INSERT`, `UPDATE` and `DELETE` are refused:
+
+```
+INSERT is not allowed on 'pings': it is an external table and is read-only.
+Its data is PARQUET at s3://acme-lake/raw/pings/. Write to the lake, then run
+REFRESH EXTERNAL TABLE pings.
+```
+
+**Worked example — register a lake table and join it to a live one:**
+
+```sql
+CREATE EXTERNAL TABLE pings
+  STORED AS PARQUET
+  LOCATION 's3://acme-lake/raw/pings/'
+  PARTITIONED BY (dt DATE)
+  WITH (CONNECTION = 'lake_s3');
+-- External table 'pings' registered over PARQUET at s3://acme-lake/raw/pings/
+-- (25 column(s), 1 partition column(s))
+
+SELECT c.name, COUNT(*) AS calls
+  FROM pings p
+  JOIN customers c ON c.id = p.customer_id
+ WHERE p.dt BETWEEN '2026-09-01' AND '2026-09-07'
+ GROUP BY c.name
+ ORDER BY calls DESC;
+```
+
+`customers` is an ordinary table; `pings` is Parquet on S3. One statement.
+
+#### Partition layout
+
+`PARTITIONED BY` declares the columns carried by the **directory name** rather
+than by the files — the Hive-style layout the export job writes:
+
+```text
+s3://acme-lake/raw/pings/dt=2026-09-18/part-0000.parquet
+s3://acme-lake/raw/pings/snapshot_dt=2026-09-18/part-0000.parquet
+s3://acme-lake/raw/_manifests/pings/dt=2026-09-18.json
+s3://acme-lake/raw/_state/pings.json
+```
+
+Only `dt=YYYY-MM-DD` and `snapshot_dt=YYYY-MM-DD` are recognised as partition
+directories. Anything else is not a partition and is skipped, so a hand-made
+`year=2026/` directory is invisible rather than half-read.
+
+A partition column is **never repeated in the column list**. Declaring it in
+both is a parse error, because the relation would then have two columns of the
+same name and no predicate could say which one it meant.
+
+Pruning partitions from their directory names, before any object is opened, is
+what makes `WHERE dt BETWEEN …` on a year-wide table cheap.
+
+!!! warning "Only partitions with a verified manifest are visible"
+    The export job writes a partition's manifest **last**, after every data file
+    is durable. Object stores have no rename, so that write order *is* the
+    atomicity: a partition with no manifest, or one whose manifest is not marked
+    verified, does not exist as far as a reader is concerned.
+
+    A half-written export is therefore **invisible**, not partially readable.
+    That is the behaviour you want: a partial partition read as if it were
+    complete is a wrong answer that looks exactly like a right one.
+
+    If a query returns fewer rows than you expect, the partition is usually
+    still exporting or its export failed — check the job's run history before
+    suspecting the query.
+
+#### Schema: inferred, or declared and checked
+
+Omit the column list and the schema is read from the Parquet footer at `CREATE`
+time. Declare one and it is **checked against the data**, and a disagreement
+fails the `CREATE`:
+
+```
+CREATE EXTERNAL TABLE orders: the declared schema does not match the data:
+column 'amount' is declared DOUBLE PRECISION but the data holds BIGINT;
+column 'region' is present in the data but not declared.
+Omit the column list to take the schema from the data.
+```
+
+Failing here rather than at query time is deliberate — a table that registers
+cleanly and breaks on first use usually breaks in front of a BI tool that cannot
+show the error. Names match case-insensitively and types by meaning rather than
+spelling; column **order** is not compared.
+
+#### `WITH (CONNECTION = '…')`
+
+Names the lake destination supplying credentials and path confinement.
+
+**The grammar marks it optional; in practice it is required.** With no
+`CONNECTION` the read path has no destination, and therefore no credentials, so
+`CREATE` fails:
+
+```
+external table 'pings' has no CONNECTION; the lake cannot know which
+destination — and therefore which credentials — to read it with
+```
+
+Always write it. It is the only supported `WITH` option, and an unknown option
+is **rejected rather than ignored** — silently dropping `CONNECTION` would build
+a table reading through credentials the operator did not choose.
+
+`LOCATION` is resolved **relative to the destination's prefix** and checked
+against that destination's read allowlist. A location outside it is refused,
+naming what was compared:
+
+```
+external table 'pings' reads raw/pings/ through destination 'lake_s3', which is
+outside its read allowlist (raw/approved/). Add the prefix to the destination
+before querying it.
+```
+
+Anyone who can write SQL could otherwise read every object those credentials
+reach, so the allowlist on the destination is the security boundary — not the
+SQL statement.
+
+`STORED AS PARQUET` is the only format (`STORED AS ORC` errors naming PARQUET),
+`LOCATION` must be a non-empty quoted URI, and `PARTITIONED BY` / `WITH` may
+appear in either order.
+
+#### `REFRESH EXTERNAL TABLE`
+
+An external table stores the column list it last resolved, so `DESCRIBE` and
+BI-tool introspection answer without a network round trip. That stored schema is
+what goes stale, and `REFRESH` is what updates it — run it after an export job
+adds or retypes a column:
+
+```sql
+REFRESH EXTERNAL TABLE pings;
+-- External table 'pings' refreshed: 26 column(s) (was 25)
+```
+
+**New partitions do not need it.** Partitions are discovered per scan and cached
+for `partition_cache_ttl_secs` (default 300 seconds; set it to `0` to discover
+on every scan), so yesterday's export becomes visible on its own inside that
+window. `REFRESH` re-resolves the schema, not the partition cache — if a day is
+missing, wait out the TTL or check that the export finished, rather than
+refreshing.
+
+Refreshing moves no data and still shows only verified partitions: an incomplete
+export stays invisible afterwards, because it is still incomplete.
+
+#### `DROP EXTERNAL TABLE` never deletes your data
+
+```sql
+DROP EXTERNAL TABLE pings;
+-- External table 'pings' unregistered. No objects were deleted from storage.
+```
+
+The registration goes; **not one object under `LOCATION` is touched**. Re-running
+`CREATE EXTERNAL TABLE` over the same prefix brings the table straight back.
+This is the opposite of `DROP TABLE` on an ordinary table, which does destroy
+the rows — worth being certain which one you are typing.
+
+Deleting lake objects is a lifecycle-policy job for the object store, and is
+deliberately not something SQL can do here: a `DROP` that silently emptied an S3
+prefix would be an unrecoverable mistake one autocomplete away.
+
+#### `SHOW EXTERNAL TABLES`
+
+One row per registered table: `table_name`, `format`, `location`, `connection`,
+`partition_columns` (rendered as `dt DATE`), `columns` (the **count** of
+resolved columns — use `DESCRIBE` for their names) and `created_at`.
+
+```sql
+SHOW EXTERNAL TABLES;
+SHOW EXTERNAL TABLES FROM lake LIKE 'ping%';
+```
+
+This is how you answer "what is this database reading out of object storage, and
+with whose credentials" — an external table's reach is the reach of its
+connection, so it is worth reading before granting anyone access. Ordinary
+tables are not listed here; `SHOW TABLES` covers both.
+
+#### Other refusals worth knowing
+
+* The statement fails if the lake provider is not installed in the build
+  ("external tables are not available in this build"). A missing provider is an
+  **error**, never an empty result — an empty answer that should have been an
+  error is the worst thing a database can return.
+* A name already used by a **regular** table is refused even under
+  `IF NOT EXISTS`: that flag means "leave the external table I already
+  registered alone", not "accept that this name belongs to something else".
+
+---
 
 ## Data Manipulation Language (DML)
 
