@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.16.0-ce` on 2026-09-25
+    **Last synced from**: `v1.17.0-ce` on 2026-09-28
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -86,20 +86,22 @@ query copied from MySQL — or emitted by a BI tool against the MySQL wire
 port — parses unchanged. `UNSIGNED` is a spelling only; the result is a signed
 64-bit integer.
 
-Casting **to** `DECIMAL` is accepted from any numeric or text source, but the
-precision and scale you write are **not applied**:
+Casting **to** `DECIMAL(p,s)` returns an exact decimal, applies the requested
+scale with half-away-from-zero rounding, and rejects values that exceed the
+precision after rounding. Precision must be 1–38 and scale must be 0–precision.
+`DECIMAL(p)` uses scale 0; bare `DECIMAL` retains the default `(19,4)`.
 
 ```sql
-SELECT CAST(12.5 AS DECIMAL(10,2));     -- 12.5, exact, still scale 1
-SELECT CAST('12.5' AS DECIMAL(10,2));   -- 12.5, but APPROXIMATE (a DOUBLE)
-SELECT CAST(12 AS DECIMAL(10,2));       -- 12.0, approximate
+SELECT CAST(12.5 AS DECIMAL(10,2));     -- 12.50, exact
+SELECT CAST('12.5' AS DECIMAL(10,2));   -- 12.50, exact
+SELECT CAST(12 AS DECIMAL(10,2));       -- 12.00, exact
+SELECT CAST(-12.345 AS DECIMAL(10,2)); -- -12.35
+SELECT CAST(999.995 AS DECIMAL(5,2));  -- error: 1000.00 exceeds precision 5
 ```
 
-A `DECIMAL` source passes through unchanged at its own scale; a `TEXT` or
-integer source becomes an approximate `DOUBLE`. So a cast is not the way to
-rescale money. Declare the column at the scale you want and let `INSERT` or
-`UPDATE` coerce to it — as of v1.16.0-ce both do, and the declared scale is
-honoured:
+Numeric text and integers are converted without passing through `DOUBLE`.
+`NULL` remains `NULL`; malformed text, nonfinite floats and overflow return
+errors. Columns also retain their declared scale on `INSERT` and `UPDATE`:
 
 ```sql
 CREATE TABLE invoices (id INT PRIMARY KEY, amount DECIMAL(10,2));
@@ -254,6 +256,8 @@ same statement against a row table. Prefer batched writes and analytical reads.
 ALTER TABLE t ADD COLUMN c data_type [constraint];
 ALTER TABLE t DROP COLUMN c;
 ALTER TABLE t RENAME COLUMN old TO new;
+ALTER TABLE old_name RENAME TO new_name;
+RENAME TABLE old_name TO new_name;
 ALTER TABLE t ALTER COLUMN c TYPE new_type;
 
 DROP TABLE [IF EXISTS] t [CASCADE];
@@ -264,6 +268,23 @@ CREATE [UNIQUE] INDEX [IF NOT EXISTS] idx_name ON t (col [ASC|DESC], ...) [USING
 CREATE [UNIQUE] INDEX [IF NOT EXISTS] idx_name ON t USING BTREE|HASH (col [ASC|DESC], ...);
 DROP   INDEX [IF EXISTS] idx_name;
 ```
+
+**Table rename.** Both spellings rename one ordinary row table within its current
+SQL database; `database.table` qualification is accepted. Rows, primary keys,
+constraints, defaults and index identities survive restart. The destination must
+not exist. Renaming rewrites row keys and document metadata, so work and temporary
+write space grow with table size. SQL statements wait while catalogs change; a
+durable intent resumes interrupted work before the next SQL statement is admitted.
+This is a recoverable operation across stores, not a multi-store transaction.
+Prepared statements from before a rename must be prepared again.
+
+Rename currently requires the tenant's dedicated SQL row store and an inactive
+transaction; centralized shared storage is not supported. Cross-database moves, auto-increment sequences, columnar/immutable/
+external tables, names beginning with `_`, partitions, foreign-key dependencies and dependent views
+are rejected before changes. Rename is also disabled while the tenant has triggers,
+stored procedures or durable agents: their stored SQL may refer to table names
+across databases and cannot yet be rewritten safely. Index names remain unchanged;
+a new table reusing the former table name receives separate constraint indexes.
 
 **Index types.** `BTREE` (the default) and `HASH` are the only implemented
 types. Both clause orders are accepted since v1.15.0-ce — `USING` before the
