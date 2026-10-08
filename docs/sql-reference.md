@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v1.18.0-ce` on 2026-10-06
+    **Last synced from**: `v2.0.0-ce` on 2026-10-08
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -24,6 +24,8 @@ The features below are AIDB-specific extensions that distinguish AIDB SQL from g
 | Cosine similarity            | `COSINE_SIMILARITY(vec_a, vec_b)` -> float in [-1, 1]                 |
 | Euclidean distance           | `EUCLIDEAN_DISTANCE(vec_a, vec_b)` -> float >= 0                      |
 | Train AutoML model           | `CREATE EXPERIMENT name AS SELECT ... WITH (task_type=..., ...)`      |
+| Queue / retrain a model      | `SELECT AUTOML.TRAIN('model', '<data query>', 'target')` *(v2.0-ce)*  |
+| Retrain only when inputs drift | `... AUTOML.TRAIN(...) WITH (retrain_on_drift = 2.0)` |
 | Predict with AutoML model    | `SELECT AUTOML.PREDICT('model', col1, col2, ...) AS risk FROM t`      |
 | List/describe models         | `SHOW MODELS`, `DESCRIBE MODEL name`                                  |
 | LLM text generation          | `GENERATE(prompt_text [, options_json])` -> TEXT                       |
@@ -46,6 +48,9 @@ The features below are AIDB-specific extensions that distinguish AIDB SQL from g
 | Query Parquet on object storage | `CREATE EXTERNAL TABLE t STORED AS PARQUET LOCATION 's3://...'` *(v1.16.0-ce+)* |
 | Re-read a lake schema        | `REFRESH EXTERNAL TABLE t` *(v1.16.0-ce+)*                             |
 | List lake tables             | `SHOW EXTERNAL TABLES` *(v1.16.0-ce+)*                                 |
+| Durable transaction          | `BEGIN; ... COMMIT;` over MySQL, or `POST /v1/transactions` *(v2.0-ce)* |
+| Partial rollback             | `SAVEPOINT n; ... ROLLBACK TO SAVEPOINT n` *(v2.0-ce)*                 |
+| Enforced referential integrity | `col INT REFERENCES parent(id) ON DELETE CASCADE` *(v2.0-ce)*        |
 
 ---
 
@@ -115,8 +120,11 @@ SELECT amount FROM invoices;            -- 7.70, padded to the declared scale
 
 **Table constraints:** `PRIMARY KEY (a, b)` — including the composite form — is
 honoured as of v1.15.0-ce, and creates both the primary key and its index.
-Out-of-line `UNIQUE (...)` and `FOREIGN KEY (...)` are parsed but not yet
-enforced; declare those at the column level.
+Out-of-line `UNIQUE (...)` and `FOREIGN KEY (...) REFERENCES ...` are **enforced as of
+v2.0-ce**, in both single-column and composite form. Earlier releases parsed and silently
+ignored them, so if you declared constraints that way before upgrading, **check for
+duplicate and orphan rows you may already have** — v2.0 will reject new violations but
+does not retroactively clean existing data.
 
 !!! warning "Before v1.15.0-ce"
     A table-level `PRIMARY KEY (a, b)` was accepted and then silently discarded:
@@ -182,8 +190,8 @@ its primary-key value, so a lookup by that key is a direct fetch. A table with a
 **composite** primary key keeps the document store's own row id, and the
 composite key is enforced through the primary key's own index instead.
 
-Out-of-line `UNIQUE (...)` and `FOREIGN KEY (...)` are still not enforced —
-declare those inline on the column.
+Out-of-line `UNIQUE (...)` and `FOREIGN KEY (...)` are **enforced as of v2.0-ce**
+(see *Referential integrity* below); before v2.0 they were parsed and ignored.
 
 **Worked example — table with a vector column for semantic search:**
 
@@ -249,6 +257,63 @@ same statement against a row table. Prefer batched writes and analytical reads.
     `ENGINE = SYNAPCORES_COLUMNAR` parsed and was then normalised away, so the
     table was silently created as a row table. Tables created that way are row
     tables and stay row tables; recreate them to move to columnar storage.
+
+### Referential integrity — `FOREIGN KEY` *(enforced as of v2.0-ce)*
+
+Foreign keys are **persisted and enforced**. Before v2.0 the syntax was accepted and
+nothing checked it, so orphan rows could be inserted freely.
+
+```sql
+-- column level
+CREATE TABLE orders (
+    id          INT PRIMARY KEY,
+    customer_id INT REFERENCES customers(id),
+    total       DECIMAL(10,2)
+);
+
+-- table level, with a referential action
+CREATE TABLE order_items (
+    id       INT PRIMARY KEY,
+    order_id INT,
+    qty      INT,
+    FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+);
+```
+
+**What is enforced.** An `INSERT` or `UPDATE` naming a parent row that does not exist is
+rejected with `Constraint violation: Foreign key violation`, and the **whole statement
+rolls back**. Deleting a parent that still has children is rejected too, unless you
+declared an action that says otherwise.
+
+**Referential actions.** `ON DELETE` / `ON UPDATE` accept `CASCADE`, `SET NULL`,
+`SET DEFAULT`, `RESTRICT` and `NO ACTION`, all applied within the same statement. With no
+action declared the behaviour is restrictive.
+
+**Requirements and limits:**
+
+* The referenced column must be a declared `PRIMARY KEY` or `UNIQUE` key, of a matching
+  type.
+* Composite keys use **`MATCH SIMPLE`**: a `NULL` in *any* part exempts the whole
+  reference from checking.
+* An `UPDATE` may not move a referenced key onto another row's pre-statement key — that
+  ambiguous swap is rejected rather than cascading a child twice.
+* **Declare foreign keys in `CREATE TABLE`.** Adding one to a table that already exists is
+  rejected, as are foreign keys **across databases**.
+* Requires the native transaction backend, which is the default. Under
+  `AIDB_SQL_TRANSACTION_BACKEND=legacy`, foreign-key creation is not available.
+* FK validation scans the connected tables. It is a correctness guarantee, not a
+  throughput-optimised path — bulk loads into deeply referenced tables will feel it.
+
+**Upgrading:** v2.0 rejects *new* violations but does not retroactively clean existing
+data. Audit for orphans before relying on the constraint:
+
+```sql
+SELECT COUNT(*) FROM orders o
+ WHERE o.customer_id IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM customers c WHERE c.id = o.customer_id);
+```
+
+---
 
 ### ALTER TABLE / DROP TABLE / CREATE INDEX / DROP INDEX
 
@@ -1011,11 +1076,63 @@ SELECT customer_id, COUNT(*) AS n_orders
 
 ### Transaction Control
 
+As of **v2.0-ce** transactions are atomic, isolated and crash-durable: writes are held
+until `COMMIT`, other connections cannot see them, and a `COMMIT` that returns success
+has already reached the write-ahead log. An acknowledged commit survives a hard kill; an
+unfinished transaction leaves nothing behind.
+
 ```sql
 BEGIN [TRANSACTION];
-COMMIT;
-ROLLBACK;
+  UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+  SAVEPOINT after_debit;
+  UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+  ROLLBACK TO SAVEPOINT after_debit;   -- keeps the debit, drops the credit
+  RELEASE SAVEPOINT after_debit;
+COMMIT;                                 -- or ROLLBACK
 ```
+
+**Where you can run this.** A bare `BEGIN` sent to `POST /v1/query/execute` is **refused
+with HTTP 400 `transaction_session_required`** — that endpoint has no session to attach a
+transaction to, and silently autocommitting is the pre-v2.0 bug. The two supported paths:
+
+* **MySQL wire connection** — `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`,
+  `ROLLBACK TO SAVEPOINT` and `RELEASE SAVEPOINT` work as your client expects.
+  Disconnecting rolls back an open transaction. `SET autocommit = 0` starts a transaction
+  on the next statement; setting it back to `1` commits the open one.
+* **REST** — `POST /v1/transactions` returns an id; pass it as `transaction_id` on each
+  statement (or use `POST /v1/transactions/{id}/execute`), then
+  `POST /v1/transactions/{id}/commit`. Savepoints are
+  `POST /v1/transactions/{id}/savepoint` with `{"name": "..."}`, and rolling back to one
+  is `POST /v1/transactions/{id}/rollback` with `{"savepoint": "..."}` — the same route
+  as a full rollback, which rolls everything back when sent with no body.
+
+**Isolation levels.** `READ COMMITTED` (the SQL and REST default) and `REPEATABLE READ`
+(the MySQL default) are supported. `READ UNCOMMITTED` and `SERIALIZABLE` are **rejected**,
+not quietly downgraded. Both supported levels see your own pending writes, including
+through scans and ranges.
+
+**Conflicts are retryable, and conservative.** Concurrent writers can receive MySQL error
+`1213` / SQLSTATE `40001`, or HTTP 409 with `code: "transaction_conflict"` and
+`retryable: true`. **Retry the whole transaction from a fresh `BEGIN`** — retrying only
+the `COMMIT` will not work. Validation tracks table epochs as well as row keys, so two
+writes to *different rows of the same table* can still conflict. Design for retries.
+
+**Ordinary DML also runs in an implicit transaction**, so a statement that fails partway —
+including its cascades — rolls itself back. Inside an explicit transaction, a failed
+statement rolls back only itself; earlier successful statements stay.
+
+**What does not participate.** Columnar tables, immutable tables, external/lake Parquet
+reads, AI and memory side effects, enabled triggers and agent event bindings are **not**
+transactional; they fail explicitly rather than appearing to enrol. DDL inside an open
+transaction, cross-database foreign keys, and adding a foreign key to an existing table
+are all rejected.
+
+**Limits.** 4,096 savepoint frames per transaction, including the internal frame each
+statement takes. Transaction timeouts run from 1 to 300 seconds and roll back on expiry.
+
+Set `AIDB_SQL_TRANSACTION_BACKEND=legacy` to return to the pre-v2.0 non-durable path. Any
+other value fails startup rather than falling back silently. Centralised/consolidated
+storage deployments must set `legacy` until that routing lands.
 
 ---
 
@@ -2019,41 +2136,118 @@ AutoML trains real models from a SQL `SELECT` and exposes the trained model as a
 
 ### `CREATE EXPERIMENT` — train a model
 
-**Syntax (current — v1.6.5):**
+**Syntax (v2.1):**
 
 ```sql
 CREATE EXPERIMENT model_name AS
-  SELECT feature_1, feature_2, ..., label_column AS target
-    FROM training_table
-   [WHERE ...]
+  SELECT feature_1, feature_2, label_column AS target FROM training_table
 WITH (
-    task_type        = 'binary_classification' | 'multi_classification' | 'regression'
-                       | 'clustering' | 'time_series',
-                       -- 'anomaly_detection' task_type — coming in v1.8 (Algorithm::IsolationForest + ANOMALY_SCORE())
-    target_column    = 'target',
-    [optimization_metric = 'auc' | 'accuracy' | 'f1' | 'rmse' | 'mae' | ...,]
-    [max_trials      = 50,]
-    [algorithms      = ['logistic_regression', 'random_forest', 'gradient_boosting']]
+    task_type = 'regression', target_column = 'target',
+    algorithms = ['ridge', 'xgboost'], max_trials = 10,
+    validation_strategy = 'holdout', validation_split = 0.2,
+    hyperparameter_strategy = 'fixed_grid',
+    optimization_metric = 'r2', random_seed = 42
 );
 ```
 
-* The `target` column from the SELECT becomes the label. By convention, for binary classification `target = 1` is the positive class (e.g. fraud, churn).
-* Without `algorithms`, AutoML runs in Auto mode and explores a sensible default set.
-* Validation predictions are calibrated with isotonic regression for binary tasks, so `AUTOML.PREDICT` returns a well-calibrated `P(class=1)`.
-* `CREATE EXPERIMENT ASYNC name AS ...` schedules training in the background; poll with `SHOW MODELS` / `DESCRIBE MODEL`.
+Accepted task types are `regression`, `classification`, `binary_classification`,
+`multi_classification`, `anomaly_detection`, `clustering`, and `time_series`.
+Explicit unknown algorithm names, task types and options are errors. SQL, REST and
+queued training use the same names and configuration.
+
+* Synchronous training defaults to a 10-minute budget. `WITH (async=true)` queues
+  the complete experiment configuration and returns a durable `job_id`.
+* `WITH (schedule='0 2 * * *')` queues an initial fit and retrains daily at 02:00 UTC.
+  Schedules accept five fields (minute/hour/day/month/weekday) or six with seconds.
+  Missed occurrences coalesce into one retrain; a running model has one job at a time.
+  Specs, statuses and schedules survive restart under the engine's data directory.
+  A job interrupted by a crash retries after its tenant's training bridge starts.
+* Use `WITH (async=true)`; the separate `CREATE EXPERIMENT ASYNC` grammar is not supported.
+* Search strategies are `fixed_grid`/`auto`, `random`, `grid`, `bayesian`/`tpe`,
+  `halving`/`hyperband`/`successive_halving`, and `optuna`. Pinned trainer parameters
+  override suggestions. Native TPE benefits from a budget large enough for its warm-up.
+  The inherited halving aliases currently generate a seeded random candidate pool;
+  they do not implement resource escalation or candidate elimination.
+* `optuna` invokes the installed upstream Python package solely for parameter search.
+  Install `optuna` in a Python environment and optionally set `AIDB_OPTUNA_PYTHON` to
+  that interpreter; otherwise `python3` is used. Missing or failing runtimes return an
+  error. Training data and model fitting stay in the Rust engine.
+* Preprocessing is fitted on the training partition only. `k_fold` fits preprocessing
+  separately in each fold; the winning regression model is refitted on all rows.
+  Classification preserves a held-out calibration partition for the served model.
+* `best_score` is a selection score, with `score_basis`, `n_folds`,
+  `refit_on_full_data`, `trials_attempted` and per-trial errors in the response.
+  Loss metrics are negated so that a larger score is better.
+* The 500,000-row default ceiling applies to both synchronous and queued experiments.
+  Raise it with `max_training_rows` or `AIDB_AUTOML_MAX_TRAINING_ROWS`; queueing does
+  not bypass it. Some expensive algorithms have smaller explicit resource ceilings.
 
 **Algorithm options:**
 
-| Algorithm           | Best for                              | Speed     | Accuracy        |
-|---------------------|---------------------------------------|-----------|-----------------|
-| logistic_regression | Binary classification, interpretable  | Fast      | Good            |
-| linear_regression   | Simple regression, interpretable      | Fast      | Good for linear |
-| random_forest       | General purpose, robust               | Medium    | High            |
-| gradient_boosting   | High accuracy, competitions           | Slow      | Very High       |
-| neural_network      | Complex patterns, large data          | Slow      | High            |
-| knn                 | Simple, local patterns                | Fast      | Medium          |
-| svm                 | Binary classification, kernels        | Medium    | High            |
-| naive_bayes         | Text classification, simple           | Very fast | Medium          |
+| Algorithm | Supported tasks | Implementation |
+|---|---|---|
+| `linear_regression` | regression | Linear regression with optional regularization |
+| `logistic_regression` | binary classification | Logistic regression |
+| `random_forest`, `decision_tree`, `extra_trees` | regression, classification | Tree estimators |
+| `gradient_boosting` | regression, classification | Native gradient boosting |
+| `lightgbm` | regression, binary classification | Native compatible boosting |
+| `xgboost` | regression, classification | Native second-order boosting with regularized split gain and leaves |
+| `catboost` | regression, classification | Native categorical boosting with symmetric trees and ordered statistics |
+| `adaboost` | binary classification | Boosted stumps |
+| `knn` | regression, classification | Nearest neighbors |
+| `svm` | binary/multiclass classification, up to ten detected classes | Support-vector classification |
+| `svr` | regression | Epsilon-insensitive support-vector regression |
+| `naive_bayes` | classification | Naive Bayes |
+| `neural_network` | regression, classification | Neural network |
+| `isolation_forest` | anomaly detection | Isolation forest |
+| `ridge`, `lasso`, `elastic_net` | regression | L2, L1 and mixed penalties |
+| `gaussian_process` | regression | RBF covariance with Cholesky inference |
+| `stacking`, `blending` | regression | Out-of-fold or held-out meta-regression over heterogeneous base models |
+| `kmeans`, `mini_batch_kmeans` | clustering | Centroid partitioning |
+| `dbscan` | clustering | Density connectivity, with -1 for noise |
+| `hierarchical` | clustering | Agglomerative single/complete/average/Ward linkage |
+| `gmm` | clustering | Regularized diagonal-covariance Gaussian mixture EM |
+| `seasonal_naive`, `ets` | time series | Seasonal baseline and exponential smoothing |
+| `arima`, `sarima` | time series | Conditional-sum-of-squares ARIMA and seasonal ARIMA |
+| `prophet` | time series | Native additive trend/changepoints/Fourier seasonality |
+
+`xgboost`, `catboost`, `lightgbm` and `prophet` name native compatible algorithm
+families. They do not load or export upstream Python/R model binaries. Ensemble
+selection is explicit; `stacking` and `blending` currently support regression.
+
+**Feature-only clustering:** omit `target_column` and select only clustering features.
+The selection metric is `silhouette` (default, deterministic bounded sample) or
+`davies_bouldin` (negated). Noise reduces the silhouette selection score; a degenerate
+one-cluster result is a failed trial. Scores are internal validation, not labeled accuracy.
+DBSCAN assigns new observations by neighboring fitted core points and returns -1 when
+none qualifies. Hierarchical prediction uses the nearest fitted cluster representative.
+
+```sql
+CREATE EXPERIMENT customer_groups AS SELECT spend, visits FROM customers
+WITH (task_type='clustering', algorithms=['kmeans'], n_clusters=4);
+SELECT AUTOML.PREDICT('customer_groups', spend, visits) FROM customers;
+```
+
+**Forecasting:** supply a numeric timestamp column and numeric target for one series.
+Training sorts by timestamp; timestamps must be unique, increasing and equally spaced.
+Fill missing observations explicitly. Set `time_column` when the query contains other
+columns. `forecast_horizon` sets the holdout window, or each `walk_forward` window when
+cross-validation is requested. Metrics are negative MAE (default), RMSE, MSE or sMAPE.
+The selected forecast is refitted on all observations before serving when budget permits.
+Predict using future timestamps on the fitted grid; in-sample and off-grid times fail.
+
+```sql
+CREATE EXPERIMENT sales_forecast AS SELECT day_index, revenue FROM daily_sales
+WITH (task_type='time_series', target_column='revenue', time_column='day_index',
+      algorithms=['ets','sarima'], seasonal_period=7, forecast_horizon=14,
+      validation_strategy='walk_forward', n_folds=3);
+SELECT AUTOML.PREDICT('sales_forecast', 120.0);
+```
+
+SVR and Gaussian processes default to at most 512 training rows (hard maximum 1024),
+hierarchy to 2000, and DBSCAN to 10000. Larger inputs fail with an explanatory resource
+limit; they are never silently sampled. Seeded training and saved preprocessing make
+reload behavior reproducible.
 
 **Worked example — train a churn model:**
 
@@ -2090,11 +2284,21 @@ SELECT pass_through_col_1, pass_through_col_2, ...,
 * First argument is the **model name as a quoted string**.
 * Remaining arguments are the **feature columns**, in any order — they are matched by name to the model's feature schema.
 * Returns:
-  * Binary classification: calibrated `P(target = 1)` as `DOUBLE`.
-  * Multiclass: probability of the predicted (top) class.
+  * Binary classification with a numeric 0/1 target: `P(target = 1)` as `DOUBLE`, calibrated when the model has fitted calibration.
+  * Multiclass with more than two fitted classes: probability of the predicted class.
   * Regression: the raw numeric prediction.
 * Default alias is `prediction` if `AS alias` is omitted.
 * You may sort or filter on the alias (`ORDER BY alias DESC`, `WHERE alias > 0.8`) — the planner pushes the prediction down so the alias is in scope.
+
+These are the top-level SQL formatter's semantics. A two-class probability row
+returns the second fitted class's probability, including for other numeric labels
+or a two-class model trained with the multiclass task. The REST bridge uses the
+persisted model task: binary returns positive-class probability, and multiclass
+returns predicted-class confidence. Training normalizes two-class classification
+requests to binary. The separate nested query executor's scalar Predict path returns
+`prediction` labels and a `confidence` column; its direct BatchPredict statement path
+is unsupported. For churn ranking,
+use an explicit binary task with `0=retained, 1=churned` and verify the route in use.
 
 **Worked example — rank customers by churn risk:**
 
@@ -2118,6 +2322,55 @@ SELECT id, tenure_months,
   FROM customers
  ORDER BY risk DESC;
 ```
+
+### `AUTOML.TRAIN(...)` — queued training and automatic retraining *(v2.0-ce)*
+
+**Syntax:**
+
+```sql
+SELECT AUTOML.TRAIN('model_name', '<data query>', '<target column>')
+  [WITH (
+     [retrain_after_rows = 10000,]
+     [retrain_on_drift   = 2.0]
+   )];
+```
+
+Unlike `CREATE EXPERIMENT`, this **queues** the work instead of blocking the connection,
+and it is how you retrain a model that is already deployed. Training requests run **one at
+a time through a global queue**, so a large job cannot starve the database of the CPU it
+needs to serve queries.
+
+**It returns a status, not a model:**
+
+| status | meaning |
+|---|---|
+| `queued` | accepted; the response carries the job id |
+| `pending_rows` | deferred — `retrain_after_rows` has not been reached yet |
+| `pending_drift` | deferred — the live feature distribution has not moved far enough |
+
+**Drift-triggered retraining.** `retrain_on_drift = <positive sigma threshold>`
+retrains only once the rows being scored have drifted that many standard deviations
+from the distribution the model was fitted on. The current shared configuration
+requires a finite positive number; `true` and a separate `drift_baseline` option
+are not supported.
+
+This needs **no labels and no ground truth** — it compares live feature values against the
+scaler stored with the model, so it works on production traffic where outcomes are not yet
+known. It is measured only over rows actually scored since deployment, so a model nothing
+has called reports *no measurement* rather than zero drift. Observing drift costs
+effectively nothing at prediction time.
+
+```sql
+-- retrain when inputs shift by 2 sigma
+SELECT AUTOML.TRAIN('churn_model',
+                    'SELECT tenure, monthly_charges, churned FROM customers',
+                    'churned')
+  WITH (retrain_on_drift = 2.0);
+```
+
+`schedule = '...'` registers active UTC cron retraining. The bounded queue persists
+configuration and job statuses; an interrupted job retries after restart. Use the same
+model name to coalesce overlapping requests.
 
 ### Model lifecycle
 
