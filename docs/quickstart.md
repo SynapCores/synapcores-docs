@@ -130,6 +130,7 @@ curl -fsSL https://get.synapcores.com | SYNAPCORES_VERSION=v1.0.0 sh
 docker run -d --name synapcores -p 8080:8080 \
            -e AIDB_ACCEPT_LICENSE=1 \
            -e AIDB_JWT_SECRET="$(openssl rand -base64 32)" \
+           -e AIDB_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
            -v synapcores-data:/var/lib/synapcores \
            ghcr.io/synapcores/community:latest
 ```

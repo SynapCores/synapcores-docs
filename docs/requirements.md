@@ -51,6 +51,7 @@ runtime libraries and works on any Linux distro with Docker installed:
 docker run -p 8080:8080 \
            -v synapcores-data:/var/lib/synapcores \
            -e AIDB_JWT_SECRET="$(openssl rand -base64 32)" \
+           -e AIDB_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
            ghcr.io/synapcores/community:latest
 ```
 

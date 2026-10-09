@@ -111,6 +111,7 @@ deployment, the official Docker image still works:
 docker run --rm -p 8080:8080 \
            -v synapcores-data:/var/lib/synapcores \
            -e AIDB_JWT_SECRET="$(openssl rand -base64 32)" \
+           -e AIDB_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
            ghcr.io/synapcores/community:latest
 ```
 
@@ -128,6 +129,7 @@ need the password, drop `--rm` and run detached:
 docker run -d --name synapcores -p 8080:8080 \
            -v synapcores-data:/var/lib/synapcores \
            -e AIDB_JWT_SECRET="$(openssl rand -base64 32)" \
+           -e AIDB_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
            ghcr.io/synapcores/community:latest
 
 docker logs synapcores 2>&1 | grep -A 7 "FIRST-BOOT"
@@ -140,6 +142,7 @@ logs:
 docker run -d --name synapcores -p 8080:8080 \
            -v synapcores-data:/var/lib/synapcores \
            -e AIDB_JWT_SECRET="$(openssl rand -base64 32)" \
+           -e AIDB_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
            -e AIDB_ADMIN_PASSWORD="<your password, 12+ chars>" \
            ghcr.io/synapcores/community:latest
 ```
