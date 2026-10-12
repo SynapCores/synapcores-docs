@@ -10,6 +10,7 @@ end-to-end with zero post-install steps** when you accept the prompt.
 | --- | --- |
 | SQL, vector storage, recipes, dashboards, REST API, JWT auth, Web UI | always |
 | Document ingest, FilesystemRAG | always |
+| NLI claim verification (`/v1/ai/nli/*`, `NLI_VERIFY`) | after a one-time `pull nli-default` (~576 MB) + restart with `AIDB_NLI_ENABLED=1` — see the [NLI manual](nli.md) |
 | Embeddings (`EMBED()`, vector search by text) | first call triggers a one-time MiniLM download (~90 MB) into `~/.cache/huggingface/` |
 | **AI Chat** | works if you accept the bootstrap's GGUF download prompt |
 | NL2SQL (`ASK ...`) | works for queries the model can answer directly; tool-using paths require Ollama or a hosted provider — see "Tool-using agents" below |

@@ -47,6 +47,11 @@ The spec is the source of truth, but the routes most integrations need are:
 | Vector search | `/v1/vectors/collections/{name}/search` | `POST` |
 | AutoML predict | `/v1/automl/models/{id}/predict` | `POST` |
 | MCP (JSON-RPC) | `/v1/mcp` | `POST` |
+| NLI verify (claim vs anchors) | `/v1/ai/nli/verify` | `POST` |
+| NLI pair scores | `/v1/ai/nli/pairs` | `POST` |
+| NLI model state | `/v1/ai/nli/models` | `GET` |
+
+The NLI endpoints have a dedicated manual with every request/response shape and error code: [NLI — claim verification](nli.md).
 | MCP info | `/v1/mcp/info` | `GET` |
 
 > **Two paths that 404 because they don't exist.** If you've seen these, you're
