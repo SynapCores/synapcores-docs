@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v2.1.1-ce` on 2026-10-11
+    **Last synced from**: `v2.1.2-ce` on 2026-10-12
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -29,6 +29,9 @@ The features below are AIDB-specific extensions that distinguish AIDB SQL from g
 | Predict with AutoML model    | `SELECT AUTOML.PREDICT('model', col1, col2, ...) AS risk FROM t`      |
 | List/describe models         | `SHOW MODELS`, `DESCRIBE MODEL name`                                  |
 | LLM text generation          | `GENERATE(prompt_text [, options_json])` -> TEXT                       |
+| NLI pair classification      | `NLI_CLASSIFY(model, premise, hypothesis)` -> JSON *(v2.1.2-ce+)*     |
+| NLI statement verification   | `NLI_VERIFY(model, statement, anchors_json [, options])` -> JSON *(v2.1.2-ce+)* |
+| NLI evidence aggregate       | `NLI_ANCHORS(text)` in `GROUP BY` -> JSON array *(v2.1.2-ce+)*        |
 | JSON object literal builder  | `json_object(key, val, ...)` -> JSON  *(v1.8.7+)*                       |
 | Native-inference model pull  | `PULL_MODEL('qwen2.5-coder:7b')` -> TEXT (v1.8.0+)                    |
 | Native-inference model list  | `LIST_MODELS()` -> table (v1.8.0+)                                    |
@@ -1522,6 +1525,85 @@ empty or partial transcript.
 Before v1.15.0-ce the function was missing from the parser's function allowlist,
 so it answered `Unknown function: transcribe` on every edition — including builds
 that had the engine.
+
+### NLI functions — `NLI_CLASSIFY`, `NLI_VERIFY`, `NLI_ANCHORS` (v2.1.2-ce+)
+
+Natural-language-inference on an installed local ONNX cross-encoder (the same
+model registry the `/v1/ai/nli/*` REST endpoints use — SQL shares the loaded
+sessions, there is no HTTP loopback). Requires NLI enabled
+(`AIDB_NLI_ENABLED=1`, model alias via `AIDB_NLI_MODEL`, default `nli-default`)
+and the model installed first: `synapcores --config <config> pull nli-default`,
+then restart the gateway. When NLI is disabled or the model is missing the
+functions error loudly — they never fall back to a generated answer. NLI
+results are never served from the SQL result cache.
+
+**`NLI_CLASSIFY(model, premise, hypothesis)` → JSON.** Probabilities for one
+pair; each text is capped at 16,384 UTF-8 bytes.
+
+```sql
+SELECT NLI_CLASSIFY('nli-default',
+                    'The deploy shipped Friday afternoon.',
+                    'A deployment happened on Friday.') AS scores;
+-- {"model":"nli-default","bundle_sha256":"3d809ec2…",
+--  "scores":{"contradiction":0.0002,"entailment":0.9966,"neutral":0.0033}}
+```
+
+**`NLI_VERIFY(model, statement, anchors_json [, options_json])` → JSON.**
+Verifies a statement against up to **32** truth-anchor sentences. Build the
+array inline with `JSON_ARRAY(...)` or aggregate rows with `NLI_ANCHORS`.
+
+```sql
+SELECT NLI_VERIFY('nli-default',
+                  'A deployment happened on Friday.',
+                  JSON_ARRAY('The deploy shipped Friday afternoon touching the checkout service.')
+       )->>'verdict' AS verdict;
+-- TRUTH
+```
+
+The result carries `verdict`, `reason`, `confidence`, `violated_anchor`,
+`matched_anchor` and per-anchor `all_scores` (contradiction, entailment,
+neutral — in the supplied anchor order). `verdict` is one of:
+
+* `TRUTH` — an anchor crossed `entailment_threshold` and none crossed
+  `contradiction_threshold`; `matched_anchor` names it.
+* `LIE` — an anchor crossed `contradiction_threshold` (`violated_anchor`
+  names it), **or** `closed_world` is true and nothing supported the
+  statement. Contradiction always takes precedence over entailment.
+* `UNVERIFIED_PLAUSIBLE` — neither threshold crossed under the default
+  open-world policy.
+
+`options_json` keys (any other key is rejected): `closed_world` (default
+`false`), `contradiction_threshold` (default `0.6`), `entailment_threshold`
+(default `0.6`). The verdict is a policy outcome over the anchors you
+supplied, not a certification of factual truth — curate the anchor set.
+Mixing unrelated timeline facts can trip contradiction precedence (e.g. a
+"Saturday rollback…" anchor scores 0.99 contradiction against a statement
+about Friday).
+
+**`NLI_ANCHORS(text)` → JSON array (aggregate).** Collects grouped rows into
+the anchors array. Bounded: 32 anchors per group, 16,384 bytes per anchor —
+exceeding either errors the statement. Exactly one text expression;
+`DISTINCT`, `FILTER`, `ORDER BY`, `OVER` and NULL-treatment modifiers are
+rejected (anchor order is deterministic). Works in `GROUP BY`, CTEs and
+`INSERT ... SELECT`.
+
+```sql
+CREATE TABLE claim_evidence (claim_id INT, anchor_text TEXT);
+INSERT INTO claim_evidence VALUES
+  (1, 'The deploy shipped Friday afternoon touching the checkout service.'),
+  (1, 'Release notes dated Friday list the checkout service deployment.');
+
+SELECT claim_id,
+       NLI_VERIFY('nli-default',
+                  'A deployment happened on Friday.',
+                  NLI_ANCHORS(anchor_text))->>'verdict' AS verdict
+  FROM claim_evidence
+ GROUP BY claim_id;
+-- 1 | TRUTH
+```
+
+Like every AI function, NLI functions cannot sit directly in `ORDER BY` —
+alias the value and sort by the alias.
 
 ## Personas (v1.14.2+)
 
