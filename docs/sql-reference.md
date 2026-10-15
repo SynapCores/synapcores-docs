@@ -1,15 +1,13 @@
 # SQL Reference
 
-!!! note "Auto-synced from source"
-    This page is **auto-synced** from the SynapCores AIDB engine
-    repository on every release tag. The canonical source is
-    `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
-    page directly**; your change will be overwritten on the next release.
-
-    **Last synced from**: `v2.1.3-ce` on 2026-10-14
+!!! note "Prepared from engine source"
+    This reference is prepared from `AIDB_SQL_MANUAL.md` on
+    `codex/release-sql-capabilities-20261014`. Release validation and merge
+    must complete before publication. The release docs-sync workflow remains
+    the canonical publisher.
 
 
-AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
+AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This reference describes the documented SQL surface for the prepared engine branch. Use only features documented here.
 
 ---
 
@@ -224,32 +222,28 @@ CREATE TABLE events (
 ) ENGINE = SYNAPCORES_COLUMNAR;
 ```
 
-`ENGINE = SYNAPCORES_COLUMNAR` is the whole syntax — it takes no further
-options. Adding a trailing option (`, COMPRESSION = 'zstd'`, `, CHECKSUM = …`,
-`, BLOCK_SIZE = …`) is a **parse error**, and a `WITH ( … )` clause on
-`CREATE TABLE` must not be used at all: it silently retypes every column to
-`TEXT` and discards the primary key.
+Both `ENGINE = SYNAPCORES_COLUMNAR` and
+`WITH (ENGINE='SYNAPCORES_COLUMNAR')` preserve declared types and constraints.
+Unknown engine options are rejected.
 
-!!! warning "`PRIMARY KEY` and `UNIQUE` are NOT enforced on columnar tables"
-    On a columnar table a `PRIMARY KEY` or `UNIQUE` declaration is a
-    clustering and metadata hint. **Duplicate keys are accepted** — the insert
-    succeeds and both rows are stored.
+Columnar `PRIMARY KEY` and `UNIQUE` declarations remain metadata hints by default:
+duplicate rows are accepted. Opt in to exact write-time enforcement with `ENFORCED`:
 
-    This follows the analytical-store convention: Snowflake, BigQuery, Amazon
-    Redshift, ClickHouse, Apache Iceberg and Delta Lake all allow the
-    declaration without enforcing it, because a uniqueness probe on every
-    insert removes the bulk-ingest advantage that is the reason to use
-    columnar storage at all. BigQuery makes you write `NOT ENFORCED`
-    explicitly.
+```sql
+CREATE TABLE keyed_events (
+    id BIGINT PRIMARY KEY ENFORCED,
+    source TEXT UNIQUE,
+    reading DOUBLE
+) WITH (ENGINE='SYNAPCORES_COLUMNAR');
+```
 
-    **A row-storage table in this engine DOES enforce it.** The same
-    statement therefore behaves differently depending on `ENGINE`, so
-    `CREATE TABLE` emits a warning when a columnar table declares one.
-
-    If you need uniqueness: de-duplicate at ingest, or use a row table for
-    the keyed data and a columnar table for the analytical copy.
-
-
+`ENFORCED` selects enforcement for **all** declared primary and unique keys on the
+table, including composite keys. Inserts reject duplicates both within the batch
+and against durable keys; updates and deletes publish row and key changes together.
+A primary key rejects NULL; unique keys allow NULL. Default hint-only tables skip
+the key-maintenance path. The additional work for enforced tables must be measured
+separately from unconstrained bulk ingestion. Columnar foreign keys and secondary
+indexes are unsupported. `NOT ENFORCED` syntax is unsupported; omit `ENFORCED` for hints.
 
 Columnar tables support the full `INSERT` / `UPDATE` / `DELETE` surface. Writes
 are copy-on-write — an affected part is rewritten rather than edited in place,
@@ -300,8 +294,11 @@ action declared the behaviour is restrictive.
   reference from checking.
 * An `UPDATE` may not move a referenced key onto another row's pre-statement key — that
   ambiguous swap is rejected rather than cascading a child twice.
-* **Declare foreign keys in `CREATE TABLE`.** Adding one to a table that already exists is
-  rejected, as are foreign keys **across databases**.
+* Declare a foreign key in `CREATE TABLE`, or add one with validating
+  `ALTER TABLE child ADD CONSTRAINT child_parent FOREIGN KEY(parent_id) REFERENCES parent(id)`.
+  An existing orphan rejects the ALTER without publishing the constraint.
+* New cross-database foreign-key declarations are unsupported. References preserved
+  by a same-tenant table move continue to enforce their qualified parent identity.
 * Requires the native transaction backend, which is the default. Under
   `AIDB_SQL_TRANSACTION_BACKEND=legacy`, foreign-key creation is not available.
 * FK validation scans the connected tables. It is a correctness guarantee, not a
@@ -327,6 +324,9 @@ ALTER TABLE t RENAME COLUMN old TO new;
 ALTER TABLE old_name RENAME TO new_name;
 RENAME TABLE old_name TO new_name;
 ALTER TABLE t ALTER COLUMN c TYPE new_type;
+ALTER TABLE t ADD CONSTRAINT unique_pair UNIQUE(a,b);
+ALTER TABLE child ADD CONSTRAINT child_parent FOREIGN KEY(parent_id) REFERENCES parent(id);
+ALTER TABLE t DROP CONSTRAINT [IF EXISTS] constraint_name;
 
 DROP TABLE [IF EXISTS] t [CASCADE];
 
@@ -337,35 +337,54 @@ CREATE [UNIQUE] INDEX [IF NOT EXISTS] idx_name ON t USING BTREE|HASH (col [ASC|D
 DROP   INDEX [IF EXISTS] idx_name;
 ```
 
-**Table rename.** Both spellings rename one ordinary row table within its current
-SQL database; `database.table` qualification is accepted. Rows, primary keys,
-constraints, defaults and index identities survive restart. The destination must
-not exist. Renaming rewrites row keys and document metadata, so work and temporary
-write space grow with table size. SQL statements wait while catalogs change; a
-durable intent resumes interrupted work before the next SQL statement is admitted.
-This is a recoverable operation across stores, not a multi-store transaction.
-Prepared statements from before a rename must be prepared again.
+**Table rename and cross-database move.** Both spellings move one ordinary row
+table within the same tenant, including `RENAME TABLE source.orders TO archive.orders`.
+The destination must not exist. Rows, constraints, index identities and parsed static
+references in views, triggers, procedures and durable SQL agents are preserved.
+Foreign-key targets retain their database identity, including cross-database cascades.
+Opaque, dynamic or ambiguous stored references are refused with the object name;
+they are never rewritten by substring replacement.
 
-Rename currently requires the tenant's dedicated SQL row store and an inactive
-transaction; centralized shared storage is not supported. Cross-database moves, auto-increment sequences, columnar/immutable/
-external tables, names beginning with `_`, partitions, foreign-key dependencies and dependent views
-are rejected before changes. Rename is also disabled while the tenant has triggers,
-stored procedures or durable agents: their stored SQL may refer to table names
-across databases and cannot yet be rewritten safely. Index names remain unchanged;
-a new table reusing the former table name receives separate constraint indexes.
+The operation requires the tenant's dedicated SQL row store and no active transaction.
+Auto-increment, non-row or partitioned tables, system names beginning with `_`, shared
+storage and cross-tenant moves remain unsupported. Row keys are rewritten, so work and
+temporary write space grow with table size. An exclusive catalog gate blocks SQL during
+publication. A durable intent resumes interrupted work before subsequent SQL is admitted;
+this is recoverable publication across stores. Reprepare existing statements afterward.
+Index names remain unchanged; a new table with the old name receives separate keys.
 
-**Index types.** `BTREE` (the default) and `HASH` are the only implemented
-types. Both clause orders are accepted since v1.15.0-ce — `USING` before the
-column list (PostgreSQL style) and after it (MySQL style). Earlier versions
-rejected the trailing form with a parse error.
+**Index types.** `BTREE` (default), `HASH`, `FULLTEXT` and `HNSW` are supported.
+Both leading and trailing `USING` clause orders are accepted. `IVFFLAT` and a scalar
+index on `VECTOR(N)` are rejected. Search indexes require ordinary row tables.
 
-`USING HNSW` and `USING IVFFLAT` are **rejected**. There is no SQL-level vector
-index. For similarity search use `COSINE_SIMILARITY`, which scans, or the
-dedicated vector-collection REST surface (`POST /v1/vectors/collections`).
+```sql
+CREATE INDEX docs_words ON docs(body) USING FULLTEXT
+WITH (stopwords='a,the,and', stemmer='english');
+CREATE INDEX product_vectors ON products(description_vec) USING HNSW
+WITH (metric='cosine', m=16, ef_construction=200, ef_search=200);
+```
 
-An index on a `VECTOR(N)` column with no `USING` clause is also **rejected**: a
-B-tree over an embedding accelerates nothing, and creating one silently would
-leave a table that looks indexed and behaves as though it is not.
+`FULLTEXT` uses Unicode alphanumeric words, lowercase normalization, a configurable
+comma-separated stop list, and optional English light suffix stemming (`none` by default).
+It ranks by BM25 (`k1=1.2`, `b=0.75`) with deterministic row-id ties. Supported queries are
+natural-language terms; boolean mode, phrases, wildcard and query expansion fail explicitly.
+`MATCH(body) AGAINST('quick fox')` uses the inverted index for matching columns; without
+one it retains the documented substring `LIKE` scan fallback. Token matching differs
+from substring matching and stop words can yield no hits. `EXPLAIN` reports the selected
+path. Use a positive MATCH predicate to exclude zero-score rows when ranking.
+
+Search-index definitions and snapshots persist. Cold use validates/rebuilds from the
+authoritative table before the index is used; startup does not scan every table. Build
+failure never publishes a partial index. `INSERT`, `UPDATE`, `DELETE`, `REINDEX` and
+`DROP INDEX` maintain or invalidate the scoped index so stale data is never authoritative.
+
+**Validating constraints.** Row tables support inline and table-level primary, unique
+and foreign keys. `ALTER TABLE t ADD CONSTRAINT name UNIQUE(a,b)` validates existing
+rows before publication; dirty data fails without attaching the constraint. Foreign
+keys require native optimistic row transactions and matching explicit parent primary
+or unique keys. `DROP CONSTRAINT [IF EXISTS] name` removes the named definition and
+backing enforcement; referenced parent keys cannot be dropped. Deferred constraints
+and `ALTER ADD CHECK` / `ALTER ADD PRIMARY KEY` are unsupported and rejected.
 
 **`CREATE INDEX` builds the index from the rows already in the table.** It
 therefore takes time proportional to table size and reports how much it did:
@@ -513,46 +532,33 @@ query results. A predicate the index cannot serve (a non-leading column, or a
 partial key on a `HASH` index) falls back to a table scan and returns correct
 rows.
 
-**Vector indexes are NOT supported at SQL level.** `USING HNSW` and
-`USING IVFFLAT` parse and plan, but execution fails with an explicit error —
-there is no HNSW structure behind the SQL index layer in this release.
-`CREATE INDEX` on a `VECTOR(N)` column *without* a vector index type is also
-rejected: a B-tree over an embedding accelerates nothing, and reporting
-"(B-tree) created" for it was a silent failure that made operators believe the
-column was indexed.
+**SQL HNSW similarity search.** A single `VECTOR(N)` column can use the production
+HNSW graph. Metrics are `cosine`, `euclidean`, `dot` and `manhattan`; the query metric
+must match the index. Use a finite top-k limit with cosine descending or Euclidean
+distance ascending. A literal, bound vector parameter or request-constant `EMBED`
+probe is evaluated once. Residual vector prefilters, unsupported shapes and queries
+without a usable limit retain the scan path. Approximate results require a recall
+check against exact scan results for the chosen dataset and `ef_search`.
 
 ```sql
--- Rejected: no HNSW behind the SQL index layer.
-CREATE INDEX i ON products(description_vec) USING HNSW;
-
--- Also rejected: decoy B-tree over a VECTOR column.
-CREATE INDEX i ON products(description_vec);
-```
-
-For a dedicated vector store with metadata-filtered k-NN, use the vector
-collection REST subsystem:
-
-```
-POST /v1/vectors/collections            {"name": "products", "dimensions": 384, "distance_metric": "cosine"}
-POST /v1/vectors/collections/products/vectors      # insert or upsert by id
-POST /v1/vectors/collections/products/search       # supports "filter" and "threshold"
-```
-
-Note: that subsystem answers **exact** k-NN (brute force). As of v1.15.0-ce an
-`index_type` other than `"flat"` is **rejected with HTTP 400** rather than
-accepted and ignored — earlier releases echoed the requested type back in the
-response while always building a flat index. Exact search is correct, just not
-sublinear. Scope for the SQL-level fix: `docs/proposals/sql_vector_indexes.md`.
-
-Similarity SQL over a `VECTOR` column needs no index and keeps working — it is
-a full scan:
-
-```sql
+CREATE INDEX product_vectors ON products(description_vec) USING HNSW
+WITH (metric='cosine', m=16, ef_construction=200, ef_search=200);
 SELECT id, COSINE_SIMILARITY(description_vec, EMBED('audio gear')) AS score
-FROM products
-ORDER BY score DESC
-LIMIT 10;
+FROM products ORDER BY score DESC LIMIT 10;
+EXPLAIN SELECT id, COSINE_SIMILARITY(description_vec, EMBED('audio gear')) AS score
+FROM products ORDER BY score DESC LIMIT 10;
 ```
+
+The index admits at most 50 million non-NULL vectors in Community Edition.
+`CREATE INDEX` reports indexed and NULL-skipped counts. Vector dimension, non-finite
+values, unsupported options and mismatched metrics are validated. The separate vector
+collection REST API retains its own supported index types and behavior; SQL HNSW does
+not change that API's capabilities.
+
+An `EMBED` probe requires a configured embedding provider whose output dimension
+matches the indexed `VECTOR(N)` column. For a provider-independent smoke test, use
+a finite literal vector of that same dimension. Record the model/provider identity
+when comparing approximate search with an exact scan.
 
 ### Immutable (append-only) tables and chain attestation
 
@@ -599,9 +605,19 @@ A pipeline that claims "N/N runs verified" must therefore require
 checksum and proves its membership in its block's merkle tree. `<id>` is the row's SQL
 id (matched against the chained payload) or the chain's internal record id.
 
-Immutable tables must be created empty with an explicit column list —
-`CREATE IMMUTABLE TABLE ... AS SELECT` is not supported; populate with
-`INSERT` / `INSERT ... SELECT`.
+Immutable tables require explicit columns. They can be populated at creation:
+
+```sql
+CREATE IMMUTABLE TABLE audit_snapshot (id BIGINT PRIMARY KEY, actor TEXT)
+AS SELECT id, actor FROM source_events ORDER BY id;
+VERIFY TABLE audit_snapshot;
+```
+
+CTAS uses the normal insert and chain-attestation path. It preserves a top-level
+`ORDER BY`; otherwise it sorts canonical typed row bytes for deterministic chain order.
+The SELECT is materialized under the query memory budget. A durable rollback intent
+removes the schema, rows, chain and wrapped key if creation fails or is interrupted.
+Recovery completes before SQL admission; dedicated durable row storage is required.
 
 **Encryption at rest (v1.12.0+):**
 
@@ -621,9 +637,12 @@ on disk. Requirements and behavior:
   table (fail-closed).
 - `AES256GCM` is the only supported algorithm. An unsupported or missing algorithm
   (e.g. bare `WITH (ENCRYPTION)` or `ENCRYPTION='AES128'`) is rejected.
-- `ENCRYPTION_KEY='name'` (a named-key registry) is **not** supported in this release; use
-  `ENCRYPTION='AES256GCM'` alone — the table gets an auto-generated per-table key wrapped
-  by the master key.
+- `ENCRYPTION_KEY='audit'` selects `AIDB_IMMUTABLE_MASTER_KEY_AUDIT`. Names use
+  1–128 ASCII letters, digits or underscores and are normalized to uppercase for lookup.
+  The selected alias is persisted; the key material is not. Missing or invalid named
+  keys and wrong keys fail closed without falling back to the default master key.
+  Without an alias, existing `AIDB_IMMUTABLE_MASTER_KEY` behavior is retained.
+  Supply at least 32 bytes encoded as hexadecimal using the same key validation.
 - Encrypted immutable tables are supported only in the **default database**; creating one
   under another database is rejected.
 
@@ -645,10 +664,8 @@ Stores the table as Parquet parts with RocksDB metadata instead of row storage.
 A query reads only the columns it names, and row-group statistics skip parts
 that cannot match the predicate.
 
-`ENGINE = SYNAPCORES_COLUMNAR` is the entire syntax and takes no further
-options — a trailing `, COMPRESSION = …` / `, CHECKSUM = …` / `, BLOCK_SIZE = …`
-is a parse error. Do not use a `WITH ( … )` clause on `CREATE TABLE`: it
-silently retypes every column to `TEXT` and drops the primary key.
+Both `ENGINE = SYNAPCORES_COLUMNAR` and `WITH (ENGINE='SYNAPCORES_COLUMNAR')`
+preserve column types and constraints. Unsupported options are rejected.
 
 Full `INSERT` / `UPDATE` / `DELETE` are supported, but writes are
 **copy-on-write**: an affected part is rewritten rather than edited in place, so
@@ -657,15 +674,11 @@ Batch the writes; read analytically. Columnar tables have no secondary indexes �
 scanning is the access path, which is the point of the format.
 
 
-**`PRIMARY KEY` and `UNIQUE` are NOT enforced on columnar tables.** The
-declaration is a clustering/metadata hint; duplicate keys are accepted and both
-rows are stored. This follows the analytical-store convention (Snowflake,
-BigQuery, Redshift, ClickHouse, Iceberg, Delta all declare without enforcing) —
-a uniqueness probe per insert would remove the bulk-ingest advantage columnar
-exists for. **A row-storage table in this engine DOES enforce it**, so the same
-statement behaves differently depending on `ENGINE`; `CREATE TABLE` warns when a
-columnar table declares one. If you need uniqueness, de-duplicate at ingest or
-keep the keyed copy in a row table.
+Primary and unique keys are metadata hints by default. Add `ENFORCED` immediately
+after a primary or unique declaration to enforce **all** declared keys on the table,
+including composite keys. Persistent exact keys are maintained with row publications;
+updates reject duplicate replacements atomically, deletes free keys, and restart retains
+enforcement. Hint-only tables skip this key path. See the columnar example above.
 
 **Before v1.15.0-ce** the `ENGINE` clause parsed and was then normalised away, so
 the statement returned ok and silently created an ordinary **row** table. A table
@@ -1127,8 +1140,9 @@ statement rolls back only itself; earlier successful statements stay.
 **What does not participate.** Columnar tables, immutable tables, external/lake Parquet
 reads, AI and memory side effects, enabled triggers and agent event bindings are **not**
 transactional; they fail explicitly rather than appearing to enrol. DDL inside an open
-transaction, cross-database foreign keys, and adding a foreign key to an existing table
-are all rejected.
+transaction and new cross-database foreign-key declarations are rejected. Outside an
+open transaction, validating `ALTER TABLE ... ADD ... FOREIGN KEY` is supported;
+existing references preserved by a same-tenant database move remain enforced.
 
 **Limits.** 4,096 savepoint frames per transaction, including the internal frame each
 statement takes. Transaction timeouts run from 1 to 300 seconds and roll back on expiry.
@@ -2214,7 +2228,7 @@ SELECT DELETE_MODEL('library/qwen2.5-coder:0.5b');
 
 ## AutoML
 
-AutoML trains real models from a SQL `SELECT` and exposes the trained model as an in-SQL function `AUTOML.PREDICT`. Training and prediction are first-class SQL — you do not call out to Python.
+AutoML trains real models from a SQL `SELECT` and exposes the trained model as an in-SQL function `AUTOML.PREDICT`. Training and prediction are first-class SQL; model fitting stays in the engine. Optional `optuna` parameter search uses an installed Python runtime, as described below.
 
 ### `CREATE EXPERIMENT` — train a model
 
@@ -2309,6 +2323,28 @@ CREATE EXPERIMENT customer_groups AS SELECT spend, visits FROM customers
 WITH (task_type='clustering', algorithms=['kmeans'], n_clusters=4);
 SELECT AUTOML.PREDICT('customer_groups', spend, visits) FROM customers;
 ```
+
+**Anomaly detection:** train native Isolation Forest without a target column, using
+only ordered feature columns. `ANOMALY_SCORE` returns a FLOAT64 in `[0,1]`, where larger
+values indicate more unusual observations. It uses the saved preprocessing and cached
+fitted model, batches projection rows, and never routes scoring to an LLM.
+
+```sql
+CREATE EXPERIMENT transaction_anomalies AS SELECT amount, velocity FROM transactions
+WITH (task_type='anomaly_detection', algorithm='isolation_forest',
+      n_trees=128, sub_sample_size=256, contamination=0.01, random_seed=7);
+SELECT id, ANOMALY_SCORE('transaction_anomalies', amount, velocity) AS score
+FROM transactions ORDER BY score DESC LIMIT 10;
+```
+
+`algorithms=['isolation_forest']` is also supported. Features must match the saved names,
+order and count. Filter or impute NULL features explicitly. Missing models, incompatible
+tasks, invalid features and non-finite scores fail the statement. Model lookup follows
+the authenticated tenant and database; fitted models reload after restart. Sort using
+the projected alias, as shown. `tail_separation` is an unsupervised selection metric,
+not F1 or labeled accuracy. `SELECT AUTOML.TRAIN('model','SELECT amount, velocity FROM
+transactions') WITH (task_type='anomaly_detection', algorithm='isolation_forest')`
+queues training; wait for completed job status before scoring.
 
 **Forecasting:** supply a numeric timestamp column and numeric target for one series.
 Training sorts by timestamp; timestamps must be unique, increasing and equally spaced.
