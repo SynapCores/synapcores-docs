@@ -373,8 +373,10 @@ one it retains the documented substring `LIKE` scan fallback. Token matching dif
 from substring matching and stop words can yield no hits. `EXPLAIN` reports the selected
 path. Use a positive MATCH predicate to exclude zero-score rows when ranking.
 
-Search-index definitions and snapshots persist. Cold use validates/rebuilds from the
-authoritative table before the index is used; startup does not scan every table. Build
+Search-index definitions and real postings/native graph snapshots persist. Cold catalog
+replay restores incomplete definitions without loading, validating or importing snapshot
+payloads. The first indexed use rebuilds from committed authoritative rows before marking
+the index ready; startup does not scan every table or provide snapshot-only serving. Build
 failure never publishes a partial index. `INSERT`, `UPDATE`, `DELETE`, `REINDEX` and
 `DROP INDEX` maintain or invalidate the scoped index so stale data is never authoritative.
 
