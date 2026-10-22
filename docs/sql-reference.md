@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v2.3.0-ce` on 2026-10-21
+    **Last synced from**: `v2.3.0-ce` on 2026-10-22
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -2592,12 +2592,12 @@ SEMANTIC JOIN reference_docs b
 
 ```sql
 CREATE [OR REPLACE] TRIGGER trg_name
-  {BEFORE | AFTER} {INSERT | UPDATE | DELETE} ON table_name
+  {BEFORE | AFTER} {INSERT | UPDATE [OF col1, col2] | DELETE} [OR ...] ON table_name
   [FOR EACH ROW]
   [WHEN (condition)]
   EXECUTE PROCEDURE proc_name(args);
 
-DROP TRIGGER [IF EXISTS] trg_name ON table_name;
+DROP TRIGGER [IF EXISTS] trg_name [ON table_name];
 
 CREATE [OR REPLACE] PROCEDURE proc_name(args) AS $$
 BEGIN
@@ -2611,6 +2611,33 @@ CALL proc_name(args);
 SHOW PROCEDURES [LIKE 'pattern'];
 SHOW TRIGGERS [FROM table_name] [LIKE 'pattern'];
 ```
+
+A trigger name belongs to the current tenant and database. `OR REPLACE` and
+`DROP TRIGGER` affect that database's definition; `DROP DATABASE` removes its
+owned triggers and attachments to dropped tables. `SHOW TRIGGERS` lists the
+current database. An invalid target, unknown `UPDATE OF` column, or duplicate
+name fails the SQL request instead of returning a successful error cell.
+
+An inline body may replace `EXECUTE PROCEDURE`, for example:
+
+```sql
+CREATE TRIGGER adjust BEFORE UPDATE OF total ON orders FOR EACH ROW
+BEGIN SET NEW.total = NEW.total + 1; END;
+```
+
+`UPDATE OF` matches the columns assigned by `SET`, even `SET total=total`;
+updates assigning only other columns skip the trigger. `WHEN` false skips the
+body. BEFORE INSERT/UPDATE may rewrite `NEW`; UPDATE/DELETE may inspect `OLD`.
+
+User-trigger writes require the native row backend. In autocommit, AFTER errors
+fail the statement and roll back native base/trigger row writes, indexes and
+row statistics. Columnar/nonnative triggered writes are refused before writing.
+Explicit native transactions still reject writes to tables with enabled
+triggers. Trigger SQL cannot run DDL or mutate a nonnative table within a native
+row statement. Completed HTTP/shell actions cannot be undone by row rollback;
+agent event enqueue is not a native commit outbox. `FOR EACH STATEMENT` currently
+uses row firing; the single-table UPDATE path is supported, while UPDATE FROM
+is not implemented.
 
 ---
 
