@@ -8,6 +8,19 @@ For richer per-release pages (architecture deep-dives, validation summary, insta
 
 ---
 
+## v2.3 series
+
+### v2.3.3-ce — 2026-10-26
+Calendar date correctness + sturdier external Parquet. A pass on v2.3.2-ce closing ten field-reported findings plus two release-only stability fixes.
+- **Calendar intervals (fixes wrong analytics):** `INTERVAL '10' YEAR` / `'10 years'` now do true calendar arithmetic (leap-aware, month-end clamp) instead of collapsing to ~N days; a `YEAR`/`MONTH` field suffix is no longer ignored; fixed-duration units keep nanosecond precision; unknown/contradictory units error instead of being silently approximated.
+- **`CAST(... AS DATE)`** strictly validated across `SELECT`, filters and `INSERT ... VALUES`; `NULL` propagates, invalid input errors.
+- **Scalar/boolean:** `SQRT`/`POWER` propagate `NULL` and accept exact `DECIMAL`; `FALSE AND` / `TRUE OR` short-circuit with correct three-valued logic.
+- **External Parquet:** nullability-only schema differences reconcile; additive columns union by name (missing → typed `NULL`); an authorized empty location registers with a declared schema; clearer file/column diagnostics.
+- **`ORDER BY` on a computed alias** keeps types across empty/all-NULL batches.
+- **Stability:** empty-body CTE now records a schema (was `CTE '…' schema not found`); view bodies execute on a fresh task and the serving-worker stack was raised, so a cross-DB `RENAME` with a dependent view and deep join/aggregate/CTE plans no longer risk a worker-stack overflow.
+- Validated on the release artifact: feature validator 316/0; recipe certification 177/187 with **zero regressions** vs v2.3.2; non-AVX-512 canary (EMBED, no SIGILL); no query-speed regression. Seamless upgrade from v2.3.x.
+- [GitHub release](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.3.3-ce)
+
 ## v1.8 series
 
 ### [v1.8.5-ce](https://github.com/SynapCores/synapcores-releases/releases/tag/v1.8.5-ce) — 2026-06-15
