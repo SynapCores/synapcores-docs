@@ -42,21 +42,53 @@ docker run -d -p 8080:8080 \
 The entrypoint pulls `nli-default` (~576 MB, one time, SHA-pinned) **before**
 starting the server when `AIDB_NLI_ENABLED=1`. Nothing else to do.
 
-### Bare metal (tarball / installer)
+### Installer (`install-ce.sh`) — the opt-in flag
 
-Pull the bundle **before** the gateway starts, using the same `--config` the
-service uses, then start (or restart) the gateway:
+NLI is an **explicit, independent opt-in** at install time; it does not depend
+on the chat-model hardware tier, and the installer leaves it off unless you ask
+for it. Pass `--with-nli` (interactive installs also prompt with a y/N), and
+optionally pick the smaller bundle:
+
+```bash
+./install-ce.sh --with-nli                           # pulls nli-default (~577 MB) and enables it
+./install-ce.sh --with-nli --nli-model nli-xsmall    # smaller footprint (~284 MB)
+```
+
+For unattended installs, set the environment instead of the flag:
+
+```bash
+SYNAPCORES_WITH_NLI=1 SYNAPCORES_NLI_MODEL=nli-default ./install-ce.sh
+```
+
+Either way the installer pulls the bundle **and** persists enablement into the
+gateway config (it runs `models enable-nli` for you), so NLI warms on the next
+engine start with no `AIDB_NLI_ENABLED` env var to set. Verify afterwards:
+
+```bash
+synapcores --config <cfg> models status nli-default        # disk-side bundle state
+# then, with the engine running:
+curl -s http://localhost:8080/v1/ai/nli/models -H "Authorization: Bearer $KEY"
+```
+
+### Bare metal (existing install or plain tarball)
+
+If NLI was not selected at install time (or you are on a hand-extracted
+tarball), pull the bundle **before** the gateway starts, persist enablement,
+then start (or restart) — all with the same `--config` the service uses:
 
 ```bash
 synapcores --config /etc/synapcores/gateway.toml pull nli-default
 # installed NLI bundle: {"alias":"nli-default","id":"nli-deberta-v3-small-fp32", ...}
+synapcores --config /etc/synapcores/gateway.toml models enable-nli nli-default
 systemctl restart synapcores
 ```
 
-Enable via environment (`AIDB_NLI_ENABLED=1`, optional
-`AIDB_NLI_MODEL=nli-default`) or the `[nli]` config section. Check disk-side
-state any time with `synapcores --config <cfg> models status nli-default`;
-**runtime** readiness is only ever reported by `GET /v1/ai/nli/models`.
+`models enable-nli` writes the `[nli]` section into the config so enablement
+survives restarts. Alternatively, enable per process via environment
+(`AIDB_NLI_ENABLED=1`, optional `AIDB_NLI_MODEL=nli-default`) — handy for Docker
+(above) and ephemeral runs. Check disk-side state any time with
+`synapcores --config <cfg> models status nli-default`; **runtime** readiness is
+only ever reported by `GET /v1/ai/nli/models`.
 
 !!! warning "Upgrade the whole folder"
     The engine loads ONNX Runtime from `lib/` **beside the executable**.
