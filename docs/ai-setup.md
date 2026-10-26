@@ -241,6 +241,12 @@ docker logs synapcores 2>&1 | grep -iE "Configured OpenAI provider|SPLIT mode|Lo
     and do not query vectors embedded under one model with another — they are
     different spaces, so re-embed if you switch models.
 
+    This also bites on **upgrade**: an existing data dir embedded with one model
+    (e.g. `nomic-embed-text`, 768-d) will mismatch if a new config/template sets
+    a different `embedding_model` (e.g. `all-minilm`, 384-d). Keep `embedding_model`
+    the same as the data you already have, or re-embed the affected collections
+    and memories.
+
 ### Verifying AI is wired up
 
 ```bash

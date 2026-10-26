@@ -333,6 +333,21 @@ FROM run_evidence WHERE run_id = 7;
 Like the other AI functions, call it through an alias rather than directly in
 `ORDER BY` (sort by the alias).
 
+!!! warning "Pass only the anchors relevant to the claim — never a whole corpus"
+    Verification is **per-anchor and contradiction wins**: one contradicting
+    anchor outvotes any number of entailing ones. So handing `NLI_VERIFY` every
+    sentence of a document set will almost always return `LIE` — a perfectly
+    true statement gets contradicted by some *unrelated* sentence (e.g. a
+    different product's warranty). Field example: verifying "The Orbit X2 Pro
+    has a 5-year warranty" against all 22 support-doc sentences returned `LIE`
+    (violated by the PA-30 adapter's 1-year line); against the single most
+    relevant sentence it correctly returned `TRUTH`.
+
+    **Retrieve first, then verify.** Select only the few anchors relevant to the
+    claim — embed the claim and take the top matches — and pass those to
+    `NLI_VERIFY`. `NLI_ANCHORS` has a 32-anchor cap for exactly this reason:
+    it is a curated evidence set, not a dump of the corpus.
+
 ---
 
 ## The guardrail pattern
