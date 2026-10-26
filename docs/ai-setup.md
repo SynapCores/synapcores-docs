@@ -170,6 +170,77 @@ sudo systemctl restart synapcores
 
 Same pattern for Anthropic (`provider = "anthropic"`, `ANTHROPIC_API_KEY`).
 
+### Changing configuration in Docker
+
+In a container there is **no systemd and no file to edit "inside" the
+container**. The config is a **host file you bind-mount** read-only; you edit it
+**on the host** and **restart the container** to apply (config is read once at
+process start — there is no hot-reload).
+
+**1. Keep `gateway.toml` on the host and mount it** (with a named volume for
+data so it survives restarts):
+
+```bash
+docker run -d --name synapcores -p 8080:8080 \
+  -v "$PWD/gateway.toml":/etc/synapcores/gateway.toml:ro \
+  -v synapcores-data:/var/lib/synapcores \
+  -e AIDB_ACCEPT_LICENSE=1 \
+  -e AIDB_JWT_SECRET="$(openssl rand -base64 32)" \
+  synapcores/community:latest --config /etc/synapcores/gateway.toml
+```
+
+The container's copy is read-only and ephemeral — the file that matters is the
+one on your host.
+
+**2. Change the model: edit the host file.** For a RAG deployment pointed at
+OpenAI (embeddings *and* generation), set the host `gateway.toml` to:
+
+```toml
+data_dir = "/var/lib/synapcores"
+[server]
+listen_addr = "0.0.0.0:8080"
+[auth]
+enabled = true
+
+[query.ai_service]
+provider        = "openai"
+model           = "gpt-4o"                   # generation (GENERATE / AGENT_RUN)
+embedding_model = "text-embedding-3-small"   # EMBED() -> OpenAI embeddings (split mode)
+# api_key via -e OPENAI_API_KEY (below), or inline: api_key = "sk-..."
+```
+
+To use the in-process model instead, set `provider = "native"`,
+`model = "llama-3.2-1b-instruct-q4_k_m"`, `embedding_model = "minilm"`. For
+Ollama on the host, `provider = "ollama"` with
+`base_url = "http://host.docker.internal:11434"` (note: from inside a container,
+the host is `host.docker.internal`, not `localhost`).
+
+**3. Secrets go through `-e`, not the file.** Add the key to `docker run`:
+
+```bash
+#   ... -e OPENAI_API_KEY=sk-... ...
+```
+
+**4. Restart the container to apply:**
+
+```bash
+docker restart synapcores
+```
+
+**5. Verify it took effect** — the boot log prints the resolved provider/model:
+
+```bash
+docker logs synapcores 2>&1 | grep -iE "Configured OpenAI provider|SPLIT mode|Local AI default"
+# e.g. "OpenAI provider configured for SPLIT mode: completion=gpt-4o, embedding=text-embedding-3-small"
+```
+
+!!! note "Embedding dimensions must match your VECTOR columns"
+    Changing the embedding model changes the vector width:
+    OpenAI `text-embedding-3-small` = **1536**, `-3-large` = **3072**, native
+    `minilm` = **384**. Declare your column to match (e.g. `embedding VECTOR(1536)`),
+    and do not query vectors embedded under one model with another — they are
+    different spaces, so re-embed if you switch models.
+
 ### Verifying AI is wired up
 
 ```bash
