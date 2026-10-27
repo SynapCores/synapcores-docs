@@ -6,7 +6,7 @@
     `AIDB_SQL_MANUAL.md` in the engine repo — **do not edit this
     page directly**; your change will be overwritten on the next release.
 
-    **Last synced from**: `v2.3.3-ce` on 2026-10-26
+    **Last synced from**: `v2.4.0-ce` on 2026-10-27
 
 
 AIDB is an AI-native SQL database with first-class support for vector embeddings, AutoML, Cypher graph queries, and LLM functions. This manual is the authoritative reference for AIDB SQL features (v1.6.0 through v1.6.5.1). Use ONLY features documented here.
@@ -49,6 +49,7 @@ The features below are AIDB-specific extensions that distinguish AIDB SQL from g
 | Explain a remembered value   | `TRACE mem FOR user_id = 123 ATTRIBUTE attr` (v1.14.3+)                |
 | Authorized removal           | `FORGET mem FOR user_id = 123 ABOUT '<scope>'` (v1.14.3+)              |
 | Query Parquet on object storage | `CREATE EXTERNAL TABLE t STORED AS PARQUET LOCATION 's3://...'` *(v1.16.0-ce+)* |
+| Write a query result to Parquet | `COPY (SELECT ...) TO LAKE 'path/' WITH (CONNECTION='destination')` |
 | Re-read a lake schema        | `REFRESH EXTERNAL TABLE t` *(v1.16.0-ce+)*                             |
 | List lake tables             | `SHOW EXTERNAL TABLES` *(v1.16.0-ce+)*                                 |
 | Durable transaction          | `BEGIN; ... COMMIT;` over MySQL, or `POST /v1/transactions` *(v2.0-ce)* |
@@ -680,6 +681,66 @@ the statement returned ok and silently created an ordinary **row** table. A tabl
 created on an older build is a row table and stays one; recreate it to move to
 columnar storage.
 
+### COPY query results to lake
+
+```sql
+COPY (SELECT id, metro, amount FROM permits WHERE amount > 0)
+TO LAKE 'matches/'
+WITH (CONNECTION = 'werkor_lake', PARTITION_BY = (metro),
+      MODE = 'overwrite_partitions', COMPRESSION = 'zstd',
+      ROW_GROUP_SIZE = 122880, FILE_TARGET_MB = 128);
+
+CREATE EXTERNAL TABLE permit_matches STORED AS PARQUET
+LOCATION 'matches/' PARTITIONED BY (metro TEXT)
+WITH (CONNECTION = 'werkor_lake');
+SELECT COUNT(*) FROM permit_matches WHERE metro = 'nyc';
+```
+
+Materializes a one-shot SELECT/WITH read query as **plain foreign Parquet**.
+The source streams directly to the writer, without the REST SELECT response
+cap. The result returns `job_id`, `run_id`, `rows_written`, `files_written`,
+`bytes_written` and `partitions_touched`.
+
+`CONNECTION` is required and `PARTITION_BY` is optional. Path columns become
+Hive directories and are omitted from the data files. Output fields are
+OPTIONAL. Exact decimals and supported temporal types remain typed Parquet.
+Writers emit row-group statistics, page indexes and high-cardinality blooms.
+
+**Permissions:** configure an explicit destination `write_allowlist`. Empty,
+including on existing upgraded destinations, disables COPY writes. Grants are
+relative to the destination root: `matches/` permits that child prefix; `/`
+explicitly permits every non-managed child location. A read allowlist is separate
+and is required to read back the output. COPY requires a fresh authenticated
+principal with effective full data-write/source-database rights. Read-only or
+table-restricted credentials and active user transactions are refused. Agent
+operating privileges alone do not grant COPY authority. SQL cannot introduce
+another bucket, absolute path or managed-lake ancestry.
+
+**Modes:** `overwrite_partitions` is the default and replaces only partitions
+actually produced; an empty source deletes nothing. `append` adds files without
+deleting old data. Repeating a successful append duplicates the rows; it is not
+an exactly-once retry interface. Compression supports `zstd`, `snappy`, `gzip`,
+`lz4`, `none`. Row groups default to 122880 rows (maximum 1048576). File targets
+default to 128 MiB (1..1024); rolling happens at row-group boundaries.
+
+**Publication:** complete files are staged out of reader visibility, then
+published with recovery records before old files are removed. Plain object-store
+listing has no multi-file transaction: readers may temporarily see a mixture of
+complete old/new files during replacement. Publication across partitions is not
+a table-wide transaction. Reruns reconcile interrupted publication; unresolved
+ownership from a different engine is never stolen merely because a timer expired.
+
+COPY shares the lake export concurrency cap and uses bounded batch/partition
+writers. The source still obeys normal query memory, spill and timeout limits.
+List/poll metadata at `/v1/lake/copy/jobs` and `/v1/lake/copy/jobs/<job_id>`, and
+inspect/cancel runs through `/v1/lake/runs`. A disconnected SQL request may still
+complete a publication already in progress; inspect the durable run before
+retrying. No SQL text or credentials are stored in COPY job records.
+
+The full contract, recovery limits and operating procedure are in
+[`docs/sql/copy_to_lake.md`](https://github.com/mataluis2k/aidb/blob/feature/v1.5.0-ce/docs/sql/copy_to_lake.md).
+External tables remain read-only for row mutations; COPY is a bulk export.
+
 ### External tables — Parquet on object storage *(v1.16.0-ce+)*
 
 ```sql
@@ -696,8 +757,8 @@ SHOW EXTERNAL TABLES [FROM <database> | IN <database>] [LIKE '<pattern>'];
 
 An **external table** is a name in the catalog pointing at a prefix in object
 storage. Nothing is copied into the database and no storage is allocated — the
-data stays where the export job wrote it, and `CREATE EXTERNAL TABLE` costs one
-Parquet footer read.
+data stays in object storage. Registration reads footer metadata across the
+dataset to establish the schema; queries reuse revision-aware metadata caches.
 
 What makes it worth having is that the planner treats it as an ordinary
 relation. A lake table **joins, filters and aggregates against RocksDB tables in
@@ -746,9 +807,9 @@ s3://acme-lake/raw/_manifests/pings/dt=2026-09-18.json
 s3://acme-lake/raw/_state/pings.json
 ```
 
-Only `dt=YYYY-MM-DD` and `snapshot_dt=YYYY-MM-DD` are recognised as partition
-directories. Anything else is not a partition and is skipped, so a hand-made
-`year=2026/` directory is invisible rather than half-read.
+Managed exports use `dt=YYYY-MM-DD` or `snapshot_dt=YYYY-MM-DD`. Foreign
+Parquet also supports arbitrary Hive directories such as `metro=nyc/year=2026`;
+declare those path columns and their types in `PARTITIONED BY`.
 
 A partition column is **never repeated in the column list**. Declaring it in
 both is a parse error, because the relation would then have two columns of the
@@ -757,7 +818,7 @@ same name and no predicate could say which one it meant.
 Pruning partitions from their directory names, before any object is opened, is
 what makes `WHERE dt BETWEEN …` on a year-wide table cheap.
 
-!!! warning "Only partitions with a verified manifest are visible"
+!!! warning "Managed exports use verified-manifest visibility"
     The export job writes a partition's manifest **last**, after every data file
     is durable. Object stores have no rename, so that write order *is* the
     atomicity: a partition with no manifest, or one whose manifest is not marked
@@ -770,6 +831,11 @@ what makes `WHERE dt BETWEEN …` on a year-wide table cheap.
     If a query returns fewer rows than you expect, the partition is usually
     still exporting or its export failed — check the job's run history before
     suspecting the query.
+
+Plain foreign datasets, including COPY output outside managed ancestry, are
+read by listing Parquet files and do not require managed manifests. A managed
+marker/state/manifest at an ancestor or a managed-writer footer deliberately
+selects the managed path instead; use separate prefixes for the two layouts.
 
 #### Schema: inferred, or declared and checked
 
@@ -788,6 +854,13 @@ Failing here rather than at query time is deliberate — a table that registers
 cleanly and breaks on first use usually breaks in front of a BI tool that cannot
 show the error. Names match case-insensitively and types by meaning rather than
 spelling; column **order** is not compared.
+
+Foreign schemas union top-level fields by name, reconcile REQUIRED/OPTIONAL
+nullability, and supply typed NULLs for missing nullable fields. Nullable declared
+supersets and empty locations with declarations are supported. Type conflicts
+remain errors. Explicit contracts survive REFRESH; inferred registrations use
+REFRESH to expose newly added logical columns. Old registrations without schema
+provenance remain conservative until reviewed and re-registered.
 
 #### `WITH (CONNECTION = '…')`
 
