@@ -123,7 +123,7 @@ endpoints the spec *describes* enforce auth as usual.
 to a specific release, snapshot the spec at deploy time:
 
 ```bash
-curl -s http://127.0.0.1:8080/v1/openapi.json > synapcores-v1.6.5.4-ce.json
+curl -s http://127.0.0.1:8080/v1/openapi.json > synapcores-v2.5.0-ce.json
 ```
 
 …and feed the snapshot to your codegen instead of the live URL.

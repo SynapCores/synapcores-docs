@@ -1,184 +1,157 @@
 # First-run AI setup
 
+The CE binary ships with the **inference engine** ([llama.cpp](https://github.com/ggerganov/llama.cpp)
+embedded) built in. There is no separate AI service to install — you point the gateway at a
+model and the AI SQL functions (`EMBED`, `GENERATE`, `AGENT_RUN`, …), the REST AI endpoints,
+and AI Chat all light up.
 
-The CE binary ships with the **inference engine** ([llama-cpp](https://github.com/ggerganov/llama.cpp)
-embedded). As of **v1.3.1-ce** the bootstrap installer also offers to
-download a default GGUF model on first run, so **AI Chat works
-end-to-end with zero post-install steps** when you accept the prompt.
+This page wires up the **generative + embedding provider**. For a capability-by-capability
+"what do I switch on to use X" map, see **[Capabilities & how to enable each](capabilities.md)**.
 
-| What works on a fresh install | Notes |
+## What works on a fresh install
+
+| Capability | Works out of the box? |
 | --- | --- |
-| SQL, vector storage, recipes, dashboards, REST API, JWT auth, Web UI | always |
-| Document ingest, FilesystemRAG | always |
-| NLI claim verification (`/v1/ai/nli/*`, `NLI_VERIFY`) | after a one-time `pull nli-default` (~576 MB) + restart with `AIDB_NLI_ENABLED=1` — see the [NLI manual](nli.md) |
-| Embeddings (`EMBED()`, vector search by text) | first call triggers a one-time MiniLM download (~90 MB) into `~/.cache/huggingface/` |
-| **AI Chat** | works if you accept the bootstrap's GGUF download prompt |
-| NL2SQL (`ASK ...`) | works for queries the model can answer directly; tool-using paths require Ollama or a hosted provider — see "Tool-using agents" below |
+| SQL, vector **storage**, recipes, dashboards, REST API, JWT auth, Web UI | ✅ always |
+| Document ingest, [Filesystem Collections](filesystem-rag.md) | ✅ always |
+| Embeddings (`EMBED()`, vector search by text) | ✅ — `all-minilm:latest` (384-dim) pulls on first use |
+| **AI Chat / `GENERATE` / NL2SQL / `AGENT_RUN`** | ✅ when a chat model is pulled (the installer offers to do this; otherwise `auto_pull` fetches it on first use) |
+| [Claim verification (NLI)](nli.md) | ⚙️ one-time `--with-nli` opt-in (or `AIDB_NLI_ENABLED=1`) + restart |
+| [One-call decisions (d1)](decisions.md) | ⚙️ one-time `synapcores pull d1:latest` |
 
-### Default install (recommended)
+!!! info "The default provider is in-process — no cloud account, no sidecar"
+    Since v1.8.0 the default provider is **`local`**: it runs quantized GGUF models
+    **in-process** and pulls them on demand from the model registry with `synapcores pull`
+    (the same `name:tag` scheme as Ollama, but no separate Ollama daemon). Your data never
+    leaves the box. You can also point at an Ollama server or a hosted API — see the three
+    options below.
 
-```bash
-curl -fsSL https://get.synapcores.com/install.sh | sh
-# → drops the binary, installs runtime deps, then prompts:
-# [get-synapcores] Download default LLM (Llama 3.2 1B Q4_K_M, ~700MB)? [Y/n]
-# → answer Y and AI Chat works after `systemctl start synapcores`.
-```
+## The default config
 
-The default config (`/etc/synapcores/gateway.toml` on Linux,
-`~/.synapcores/gateway.toml` on macOS) ships pre-wired:
+The installer writes this `[query.ai_service]` block to your `gateway.toml`
+(`/etc/synapcores/gateway.toml` on Linux, `~/.synapcores/gateway.toml` on macOS):
 
 ```toml
 [query.ai_service]
-provider        = "native"
-model           = "llama-3.2-1b-instruct-q4_k_m"
-embedding_model = "minilm"
+provider        = "local"            # in-process llama.cpp; no external service
+model           = "qwen2.5:7b"       # chat / GENERATE / AGENT_RUN / NL2SQL
+embedding_model = "all-minilm:latest"  # EMBED() -> 384-dim vectors
+auto_pull       = true               # fetch a named model on first use if it is missing
 ```
 
-### Generative LLM (Chat / NL2SQL) — three options
+With `auto_pull = true`, the first call that needs a model pulls it automatically. To pull
+ahead of time (recommended on a fresh box, so the first request isn't slow):
 
-#### Option 1 — In-process GGUF (default — fully offline)
+```bash
+synapcores --config /etc/synapcores/gateway.toml pull qwen2.5:7b      # ~4.4 GiB chat model
+synapcores --config /etc/synapcores/gateway.toml pull all-minilm:latest  # ~44 MiB embeddings
+synapcores --config /etc/synapcores/gateway.toml models list
+```
 
-What the bootstrap does for you on `Y`. To do it manually:
+!!! tip "Hardware-adaptive default"
+    On a host with **≥ 8 GiB RAM**, `qwen2.5:7b` is the default chat model. On tighter boxes,
+    pick a smaller GGUF (below) and set it as `model`. Embeddings (`all-minilm:latest`, 384-dim)
+    run in tens of milliseconds even on a Raspberry Pi.
 
-1. Create the models dir:
+## Generative LLM (Chat / NL2SQL / AGENT_RUN) — three options
 
-   ```bash
-   # Linux
-   sudo -u synapcores mkdir -p /opt/synapcores/models/text
-   # macOS
-   mkdir -p ~/.synapcores/models/text
-   ```
+### Option 1 — In-process model (default, fully offline)
 
-2. Download a GGUF-quantized model:
+This is what the default config above does. To change or add a model, pull it and point
+`model` at it:
 
-   ```bash
-   # Linux
-   sudo -u synapcores curl -fL \
-     -o /opt/synapcores/models/text/llama-3.2-1b-instruct-q4_k_m.gguf \
-     "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
-   ```
+```bash
+synapcores --config /etc/synapcores/gateway.toml pull llama3.2:3b
+```
 
-3. Confirm the gateway's systemd unit (Linux) sets `AIDB_MODELS_DIR`:
+```toml
+[query.ai_service]
+provider  = "local"
+model     = "llama3.2:3b"
+auto_pull = true
+```
 
-   ```bash
-   sudo systemctl cat synapcores | grep AIDB_MODELS_DIR
-   # Expect: Environment=AIDB_MODELS_DIR=/opt/synapcores/models/text
-   ```
+Restart to pick up a config change (`sudo systemctl restart synapcores`). No restart is needed
+to *use* a model that is already pulled.
 
-   If missing (older install), add it:
+Good in-process choices:
 
-   ```bash
-   sudo systemctl edit synapcores
-   ```
+| Model (`pull` name) | Size | Notes |
+| --- | --- | --- |
+| `qwen2.5:7b` | ~4.4 GiB | **default** — strong tool-use + reasoning on CPU |
+| `llama3.2:3b` | ~2 GiB | lighter, good general chat |
+| `phi3.5` | ~2 GiB | strong reasoning for its size |
+| `llama3.2:1b` | ~0.7 GiB | smallest; for very constrained hosts |
 
-   ```ini
-   [Service]
-   Environment="AIDB_MODELS_DIR=/opt/synapcores/models/text"
-   Environment="AIDB_CONTEXT_SIZE=4096"
-   Environment="AIDB_GPU_LAYERS=0"  # CPU-only; raise if you built from source w/ GPU
-   ```
-
-4. Restart and verify:
-
-   ```bash
-   sudo systemctl restart synapcores
-   sudo journalctl -u synapcores -f | grep -i gguf
-   # Expect: Loading GGUF model: llama-3.2-1b-instruct-q4_k_m from ".../models/text"
-   ```
-
-CPU-only is the default for published binaries; GPU acceleration
-(`--features llama-cpp/cuda` or `metal`) requires a source build.
-Performance bands on the default Llama 3.2 1B Q4_K_M model:
+CPU-only is the default for the published binaries. GPU acceleration (`cuda` / `metal` /
+`vulkan`) requires a source build — see [Hardware requirements](requirements.md). Throughput
+bands on a 7B Q4\_K\_M model:
 
 | Hardware | tokens/sec |
 | --- | --- |
-| Apple Silicon M1/M2/M3/M4 (CPU) | 30–80 |
+| Apple Silicon M1–M4 | 30–80 |
 | Modern x86 with AVX2 (Zen 3+, Intel 11th gen+) | 5–15 |
 | Older x86 without AVX2 | 1–3 |
 
-To swap models, drop a different GGUF in the same dir and update the
-`model` field in the config to its filename without `.gguf`.
-Recommended bigger options:
+!!! success "Tool-using agents work on the in-process provider"
+    The `local` provider implements **native, grammar-constrained tool calling**, so
+    `AGENT_RUN` and the tool-using NL2SQL / agent flows run entirely in-process on a
+    tool-capable model (the default `qwen2.5:7b` qualifies). The older guidance that said
+    "switch to Ollama for tool calls" is obsolete. If you point `model` at a model that
+    cannot emit tool calls, `AGENT_RUN` returns a clear error naming the config key to
+    change — it does not silently degrade.
 
-* **Llama 3.2 3B Instruct Q4_K_M** (~2 GB, better quality)
-* **Phi-3.5 Mini Q4_K_M** (~2 GB, strong reasoning for size)
-* **Qwen 2.5 7B Instruct Q4_K_M** (~4.5 GB, near-frontier quality on CPU)
+### Option 2 — Ollama (a separate model server)
 
-### Tool-using agents (NL2SQL with tool calls, FilesystemRAG agent search)
-
-The default `native` provider runs in-process llama-cpp inference and
-gives you plain text completions back. **It does not implement
-native tool calling** the way Ollama's `/api/chat` endpoint does, so
-agent flows that require the model to emit structured `tool_calls`
-will fall back to direct text — fine for most chat, but agents that
-chain SQL execution or filesystem search via tool invocation will be
-degraded.
-
-If you need tool-using agents today, swap to Ollama or a hosted
-provider — both implement the tool-calling API. v1.3.2 is expected
-to add prompt-template-based tool extraction so the native provider
-can participate in tool flows too.
-
-#### Option 2 — Wire up Ollama (recommended for evaluation)
-
-Ollama runs as a separate service on the host and gives you a model menu
-with one-line `ollama pull` commands. The gateway just hits Ollama over
-HTTP — no model files in your data dir.
-
-1. Install Ollama and pull a model:
-
-   ```bash
-   curl -fsSL https://ollama.com/install.sh | sh
-   ollama pull llama3.2          # ~2 GB, runs comfortably on 8 GB RAM
-   ```
-
-2. Wire the gateway to it in `/etc/synapcores/gateway.toml`:
-
-   ```toml
-   [query.ai_service]
-   provider = "ollama"
-   base_url = "http://localhost:11434"
-   model    = "llama3.2"
-   ```
-
-3. Restart:
-
-   ```bash
-   sudo systemctl restart synapcores
-   ```
-
-#### Option 3 — External provider (OpenAI / Anthropic)
-
-Cheapest setup, requires sending data to a third party. Counts against
-the CE per-day quota (`MaxExternalLlmCallsPerDayPerUser = 300`).
-
-```toml
-# /etc/synapcores/gateway.toml
-[query.ai_service]
-provider = "openai"
-api_key  = "${OPENAI_API_KEY}"     # or hardcode if not secret-sensitive
-model    = "gpt-4o-mini"           # or any other model name the provider serves
-```
-
-Set the secret via systemd so it stays out of the file:
+Run Ollama on the host and have the gateway call it over HTTP. Useful if you already run
+Ollama or want its model menu.
 
 ```bash
-sudo systemctl edit synapcores
-# Add: Environment="OPENAI_API_KEY=sk-..."
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull llama3.2
+```
+
+```toml
+[query.ai_service]
+provider = "ollama"
+base_url = "http://localhost:11434"
+model    = "llama3.2"
+```
+
+```bash
 sudo systemctl restart synapcores
 ```
 
-Same pattern for Anthropic (`provider = "anthropic"`, `ANTHROPIC_API_KEY`).
+### Option 3 — External provider (OpenAI / Anthropic / Gemini)
 
-### Changing configuration in Docker
+Cheapest to run, but sends data to a third party, and counts against the CE quota
+(`MaxExternalLlmCallsPerDayPerUser = 300` — see [Limits](limits.md)).
 
-In a container there is **no systemd and no file to edit "inside" the
-container**. The config is a **host file you bind-mount** read-only; you edit it
-**on the host** and **restart the container** to apply (config is read once at
-process start — there is no hot-reload).
+```toml
+[query.ai_service]
+provider        = "openai"                   # or "anthropic" / "gemini"
+model           = "gpt-4o-mini"              # a model the provider serves
+embedding_model = "text-embedding-3-small"   # EMBED() -> OpenAI embeddings (1536-dim)
+# api_key supplied via systemd env (below), or inline: api_key = "sk-..."
+```
 
-**1. Keep `gateway.toml` on the host and mount it** (with a named volume for
-data so it survives restarts):
+Keep the secret out of the file with a systemd override:
+
+```bash
+sudo systemctl edit synapcores
+# [Service]
+# Environment="OPENAI_API_KEY=sk-..."
+sudo systemctl restart synapcores
+```
+
+Valid `provider` values: `local` (default, in-process), `ollama`, `openai`, `anthropic`
+(alias `claude`), `gemini`. (`native` is a legacy filesystem-GGUF provider; prefer `local`.)
+
+## Changing configuration in Docker
+
+A container has no systemd and no file to edit "inside" it. The config is a **host file you
+bind-mount read-only**; you edit it on the host and **restart the container** (config is read
+once at process start — there is no hot-reload).
 
 ```bash
 docker run -d --name synapcores -p 8080:8080 \
@@ -189,11 +162,8 @@ docker run -d --name synapcores -p 8080:8080 \
   synapcores/community:latest --config /etc/synapcores/gateway.toml
 ```
 
-The container's copy is read-only and ephemeral — the file that matters is the
-one on your host.
-
-**2. Change the model: edit the host file.** For a RAG deployment pointed at
-OpenAI (embeddings *and* generation), set the host `gateway.toml` to:
+Point a RAG deployment at OpenAI (generation *and* embeddings) by setting the host
+`gateway.toml`:
 
 ```toml
 data_dir = "/var/lib/synapcores"
@@ -204,68 +174,43 @@ enabled = true
 
 [query.ai_service]
 provider        = "openai"
-model           = "gpt-4o"                   # generation (GENERATE / AGENT_RUN)
-embedding_model = "text-embedding-3-small"   # EMBED() -> OpenAI embeddings (split mode)
-# api_key via -e OPENAI_API_KEY (below), or inline: api_key = "sk-..."
+model           = "gpt-4o"
+embedding_model = "text-embedding-3-small"
 ```
 
-To use the in-process model instead, set `provider = "native"`,
-`model = "llama-3.2-1b-instruct-q4_k_m"`, `embedding_model = "minilm"`. For
-Ollama on the host, `provider = "ollama"` with
-`base_url = "http://host.docker.internal:11434"` (note: from inside a container,
-the host is `host.docker.internal`, not `localhost`).
-
-**3. Secrets go through `-e`, not the file.** Add the key to `docker run`:
-
-```bash
-#   ... -e OPENAI_API_KEY=sk-... ...
-```
-
-**4. Restart the container to apply:**
-
-```bash
-docker restart synapcores
-```
-
-**5. Verify it took effect** — the boot log prints the resolved provider/model:
-
-```bash
-docker logs synapcores 2>&1 | grep -iE "Configured OpenAI provider|SPLIT mode|Local AI default"
-# e.g. "OpenAI provider configured for SPLIT mode: completion=gpt-4o, embedding=text-embedding-3-small"
-```
+To stay fully in-process instead, use `provider = "local"`, `model = "qwen2.5:7b"`,
+`embedding_model = "all-minilm:latest"`. For Ollama on the host, `provider = "ollama"` with
+`base_url = "http://host.docker.internal:11434"` (from inside a container the host is
+`host.docker.internal`, not `localhost`). Pass secrets with `-e OPENAI_API_KEY=sk-...`, then
+`docker restart synapcores`.
 
 !!! note "Embedding dimensions must match your VECTOR columns"
-    Changing the embedding model changes the vector width:
-    OpenAI `text-embedding-3-small` = **1536**, `-3-large` = **3072**, native
-    `minilm` = **384**. Declare your column to match (e.g. `embedding VECTOR(1536)`),
-    and do not query vectors embedded under one model with another — they are
-    different spaces, so re-embed if you switch models.
+    Changing the embedding model changes the vector width: native `all-minilm` = **384**,
+    OpenAI `text-embedding-3-small` = **1536**, `-3-large` = **3072**. Declare your column to
+    match (e.g. `embedding VECTOR(1536)`), and never query vectors embedded under one model
+    with another — they are different spaces. This also bites on **upgrade**: a data dir
+    embedded with one model mismatches if a new config sets a different `embedding_model`.
+    Keep `embedding_model` the same as the data you already have, or re-embed.
 
-    This also bites on **upgrade**: an existing data dir embedded with one model
-    (e.g. `nomic-embed-text`, 768-d) will mismatch if a new config/template sets
-    a different `embedding_model` (e.g. `all-minilm`, 384-d). Keep `embedding_model`
-    the same as the data you already have, or re-embed the affected collections
-    and memories.
+## Verify AI is wired up
 
-### Verifying AI is wired up
+Get a token (`POST /v1/auth/login`), then exercise the two core paths through
+`/v1/query/execute` — unambiguous and provider-independent:
 
 ```bash
-TOKEN="<JWT obtained from /v1/auth/login>"
+TOKEN="<JWT from /v1/auth/login>"
 
-# Embeddings (no LLM needed):
-curl -H "Authorization: Bearer $TOKEN" -X POST \
-     -H "Content-Type: application/json" \
-     -d '{"sql":"SELECT EMBED(\"hello world\") AS v"}' \
-     http://localhost:8080/v1/query/execute
+# Embeddings (no chat model needed):
+curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"sql":"SELECT EMBED('\''hello world'\'') AS v"}' \
+  http://localhost:8080/v1/query/execute
 
-# AI Chat (needs Option 1, 2, or 3 wired up):
-curl -H "Authorization: Bearer $TOKEN" -X POST \
-     -H "Content-Type: application/json" \
-     -d '{"message":"What tables exist?","database":"default"}' \
-     http://localhost:8080/v1/chat/message
+# Generation (needs a chat model from Option 1, 2, or 3):
+curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"sql":"SELECT GENERATE('\''Say hello in one word.'\'') AS reply"}' \
+  http://localhost:8080/v1/query/execute
 ```
 
-If AI Chat returns `{"error":"no AI provider configured"}` or similar,
-the `[query.ai_service]` block is missing from your config. Pick an
+AI Chat has its own endpoints, `POST /v1/ai/chat` and `POST /v1/ai/chat/stream` (SSE). If a
+call returns `no AI provider configured`, the `[query.ai_service]` block is missing — pick an
 option above and restart.
-

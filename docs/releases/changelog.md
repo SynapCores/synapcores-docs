@@ -8,6 +8,43 @@ For richer per-release pages (architecture deep-dives, validation summary, insta
 
 ---
 
+## v2.5 series
+
+### [v2.5.0-ce](v2.5.0-ce.md) — 2026-11-11
+**Decisions in one call — the d1 decision model.** Full notes: [v2.5.0-ce page](v2.5.0-ce.md).
+- New endpoint `POST /v1/systemone` returns a **typed decision** — a routing `choice` with a probability for every option, a yes/no `noul`, or an ordered `score` — in a single forward pass with **zero generated tokens**. Backed by the purpose-built **d1** model (pull-on-demand, ~2.7 GiB); accepts any causal model you pull via the request `model` field. Name `"model": "d1:latest"` per request.
+- The embedded `local` provider now defaults to **`qwen2.5:7b`** across chat, `AGENT_RUN`, and NL tooling.
+- AutoML model/experiment commands (`DROP MODEL name;`, `DESCRIBE MODEL name;`, …) tolerate a trailing `;`.
+- Cypher `CREATE` accepts a comma-separated pattern list (`CREATE (a), (b)-[:R]->(c)`).
+- Faster batch embeddings against Ollama via `/api/embed`, with a graceful fallback on older servers.
+- Validated on the release artifact: feature validator 316/0; `/v1/systemone` parity-matched to the reference d1 (argmax all-match, worst-case probability delta 0.025); non-AVX-512 canary (d1 decision + `EMBED`, no SIGILL). Seamless upgrade from v2.4.x.
+
+## v2.4 series
+
+### [v2.4.8-ce](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.8-ce) — 2026-11-07
+**`EMBED` truncates oversized text by default.** Text longer than the embedding model's 512-token window is truncated and embedded with a logged warning instead of erroring. Opt back into strict rejection with `embed_truncate=false` (config) or `AIDB_EMBED_OVERSIZE=reject`; `/health` reports the model's `input_budget`. Workaround on older versions: chunk to < 500 tokens before `EMBED`.
+
+### [v2.4.7-ce](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.7-ce) — 2026-11-05
+**Data-lake incremental correctness.** An incremental lake refresh now re-reads a partition that has grown since the last run (within `lookback_days`) instead of skipping it, fixing under-capture of late-arriving rows.
+
+### [v2.4.6-ce](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.6-ce) — 2026-11-05
+**Graph Explorer fix + a developer-report batch.** `DROP EXPERIMENT`; `ANOMALY_SCORE` nested under `ROUND`; `CREATE IMMUTABLE TABLE` inside a named database; `AGENT_RUN` timeout handling; `DATE_SUB`/`DATE_ADD` combined with `GROUP_CONCAT ... SEPARATOR`; an MCP `db` argument.
+
+### [v2.4.4-ce](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.4-ce) — 2026-11-03
+**OLTP contention correctness.** Fixes `UNIQUE` over-conflict and same-table `FOREIGN KEY` self-reference; `REPEATABLE READ` is now write-skew-safe (SSI) and `SERIALIZABLE` is correct; adds per-database admission epochs and automatic compaction; `ORDER BY` on an aggregate alias; `SELECT RAISE()`.
+
+### [v2.4.3-ce](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.3-ce) — 2026-10-31
+`FOREIGN KEY` parent-table over-conflict, composite-FK column ordering, and `CREATE TRIGGER IF NOT EXISTS` (one affected path was completed in v2.4.4).
+
+### [v2.4.2-ce](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.2-ce) — 2026-10-30
+**MySQL-wire compatibility + a silent write-corruption fix.** An `UPDATE` that coerced a value to `NULL` no longer loses data; several MySQL client-handshake fixes.
+
+### [v2.4.1-ce](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.1-ce) — 2026-10-28
+CTE joins, `ROUND(NULL)`, batch alignment, and Unicode-handling corrections on top of v2.4.0.
+
+### [v2.4.0-ce](v2.4.0-ce.md) — 2026-10-27
+**`COPY ... TO LAKE`.** Materialize any `SELECT`/`WITH` result as Hive-partitioned foreign Parquet in your object store in one statement. Full notes: [v2.4.0-ce page](v2.4.0-ce.md).
+
 ## v2.3 series
 
 ### v2.3.3-ce — 2026-10-26

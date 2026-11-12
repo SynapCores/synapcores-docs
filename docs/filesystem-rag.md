@@ -78,7 +78,6 @@ entirely — no metadata entry, no log line beyond a debug-level skip.
 4. Click **Create**. The collection enters `active` state immediately
    and a startup scan kicks off.
 
-> Screenshots coming with v1.2.0 release.
 
 ### Option B — From SQL
 

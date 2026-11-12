@@ -73,11 +73,13 @@ nav:
       - Quickstart: quickstart.md
       - Hardware requirements: requirements.md
       - First-run AI setup: ai-setup.md
+      - Capabilities & how to enable each: capabilities.md
       - Web UI: web-ui.md
       - Run on macOS: macos.md
   - Reference:
       - SQL reference: sql-reference.md
       - NLI — claim verification (REST + SQL): nli.md
+      - Decision model (d1) — one-call decisions: decisions.md
       - REST API (OpenAPI + Swagger UI): api-reference.md
       - MCP setup (Claude / Cursor / Continue / Windsurf / Zed / LangChain): mcp-setup.md
       - Limits & quotas: limits.md
@@ -86,6 +88,7 @@ nav:
   - Releases:
       - Overview: releases/index.md
       - Full changelog (v1.0 → latest): releases/changelog.md
+      - v2.5.0-ce — Decisions in one call (the d1 decision model): releases/v2.5.0-ce.md
       - v2.4.0-ce — COPY query results to lake (partitioned Parquet in one statement): releases/v2.4.0-ce.md
       - v2.3.3-ce — Calendar date math you can trust + sturdier external Parquet: releases/v2.3.3-ce.md
       - v2.3.2-ce — Agent RBAC + a correctness hardening pass (debuts the DAVINCI line): releases/v2.3.2-ce.md
@@ -102,6 +105,8 @@ nav:
       - v1.14.1.1-ce — Critical patch: releases/v1.14.1.1-ce.md
       - v1.14.1-ce — MongoDB Data Sync: releases/v1.14.1-ce.md
       - v1.14.0-ce — Native Vision: releases/v1.14.0-ce.md
+      - v1.11.0-ce — MySQL wire protocol: releases/v1.11.0-ce.md
+      - v1.10.0-ce — MySQL compatibility: releases/v1.10.0-ce.md
       - v1.9.1-ce — Tamper-evident agent lineage: releases/v1.9.1-ce.md
       - v1.9.0-ce — CREATE AGENT (durable agents): releases/v1.9.0-ce.md
       - v1.8.9-ce — Agent memory upsert: releases/v1.8.9-ce.md

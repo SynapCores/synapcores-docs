@@ -1,7 +1,8 @@
 # SynapCores Documentation
 
-**SynapCores** is an AI-native database. SQL, vector search, ML, and an
-embedded LLM inference engine in one self-hosted binary.
+**SynapCores** is an AI-native database: SQL, vector search, in-database ML,
+graph, agents, one-call decisions, and an embedded LLM inference engine — in one
+self-hosted binary, with no external AI service required.
 
 ## Install in one line
 
@@ -17,7 +18,7 @@ for the full walkthrough.
 
 | Built-in | Out-of-the-box | Optional |
 | --- | --- | --- |
-| SQL engine | 120 seeded recipes on first boot | GPU acceleration (source build) |
+| SQL engine | 160+ seeded recipes on first boot | GPU acceleration (source build) |
 | Vector storage + HNSW search | Random admin password, printed once | Ollama integration |
 | Embedded React Web UI on the same port | Embeddings via Hugging Face auto-download | OpenAI / Anthropic providers |
 | llama-cpp inference engine | Hardened systemd unit | TLS termination |
@@ -37,8 +38,18 @@ for the full walkthrough.
 
 - :material-robot:{ .lg .middle } **[First-run AI setup](ai-setup.md)**
 
-    Wire up a local GGUF, Ollama, or external provider for AI Chat
-    and NL2SQL.
+    Wire up an in-process model, Ollama, or an external provider for
+    AI Chat, GENERATE, embeddings, and agents.
+
+- :material-tune-variant:{ .lg .middle } **[Capabilities & how to enable each](capabilities.md)**
+
+    The switchboard — every technology, the one step to turn it on,
+    and the one call to use it.
+
+- :material-check-decagram:{ .lg .middle } **[Decision model (d1)](decisions.md)**
+
+    One HTTP call returns a typed decision — a routing choice, a
+    yes/no probability, or an urgency score. Zero generated tokens.
 
 - :material-monitor-dashboard:{ .lg .middle } **[Web UI](web-ui.md)**
 

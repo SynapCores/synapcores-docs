@@ -9,13 +9,13 @@ curl -fsSL https://get.synapcores.com | sh
 To pin a specific version:
 
 ```bash
-curl -fsSL https://get.synapcores.com | SYNAPCORES_VERSION=v1.10.0-ce sh
+curl -fsSL https://get.synapcores.com | SYNAPCORES_VERSION=v2.5.0-ce sh
 ```
 
 Or via Docker:
 
 ```bash
-docker pull synapcores/community:v1.10.0-ce
+docker pull synapcores/community:v2.5.0-ce
 ```
 
 Release artifacts (binaries + SHA-256 sidecars + the install script) live on the [SynapCores/synapcores-releases](https://github.com/SynapCores/synapcores-releases/releases) GitHub repository.
@@ -24,6 +24,14 @@ Release artifacts (binaries + SHA-256 sidecars + the install script) live on the
 
 | Version | Date | Headline |
 |---|---|---|
+| [**v2.5.0-ce**](v2.5.0-ce.md) | 2026-11-11 | **Decisions in one call** — a new `POST /v1/systemone` endpoint returns a typed decision (a routing `choice` with per-option probabilities, a yes/no `noul`, or an ordered `score`) in a single forward pass with **zero generated tokens**, backed by the purpose-built **d1** decision model and open to any causal model you pull. Also: `qwen2.5:7b` is the one default chat model, AutoML commands tolerate a trailing `;`, Cypher `CREATE` takes a comma-separated pattern list, and faster Ollama batch embeddings. Seamless upgrade from v2.4.x |
+| **v2.4.8-ce** | 2026-11-07 | `EMBED` **truncates oversized text by default** instead of erroring — text over the model's 512-token window is truncated and embedded with a warning; opt back into rejection with `embed_truncate=false` / `AIDB_EMBED_OVERSIZE=reject`; `/health` reports the `input_budget`. [notes](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.8-ce) |
+| **v2.4.7-ce** | 2026-11-05 | **Data-lake incremental correctness** — an incremental lake refresh now re-reads a partition that has grown since last run (`lookback_days`) instead of skipping it, fixing under-capture of late-arriving rows. [notes](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.7-ce) |
+| **v2.4.6-ce** | 2026-11-05 | **Graph Explorer fix + developer-report batch** — `DROP EXPERIMENT`, `ANOMALY_SCORE` under `ROUND`, immutable tables in a named database, `AGENT_RUN` timeout handling, `DATE_SUB`/`DATE_ADD` with `GROUP_CONCAT ... SEPARATOR`, and an MCP `db` argument. [notes](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.6-ce) |
+| **v2.4.4-ce** | 2026-11-03 | **OLTP contention correctness** — fixes `UNIQUE` over-conflict and same-table `FK` self-reference, makes `REPEATABLE READ` write-skew-safe (SSI) and `SERIALIZABLE` correct, adds per-database admission epochs and auto-compaction, plus `ORDER BY` on an aggregate alias and `SELECT RAISE()`. [notes](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.4-ce) |
+| **v2.4.3-ce** | 2026-10-31 | `FOREIGN KEY` parent-table over-conflict + composite-FK column ordering + `CREATE TRIGGER IF NOT EXISTS` (one path completed in v2.4.4). [notes](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.3-ce) |
+| **v2.4.2-ce** | 2026-10-30 | **MySQL-wire compatibility + a silent write-corruption fix** — an `UPDATE` that coerced a value to `NULL` no longer loses data; several MySQL client-handshake fixes. [notes](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.2-ce) |
+| **v2.4.1-ce** | 2026-10-28 | CTE joins, `ROUND(NULL)`, batch alignment, and Unicode handling corrections on top of v2.4.0. [notes](https://github.com/SynapCores/synapcores-releases/releases/tag/v2.4.1-ce) |
 | [**v2.4.0-ce**](v2.4.0-ce.md) | 2026-10-27 | `COPY ... TO LAKE` — materialize any `SELECT`/`WITH` result as plain, Hive-partitioned foreign Parquet in your object store in one statement (streamed, no REST cap; `overwrite_partitions`/`append`; `zstd`/`snappy`/`gzip`/`lz4`), gated by a fresh full-write principal + explicit destination `write_allowlist`, with durable publication recovery and `CREATE EXTERNAL TABLE` round-trip. Also: fresh installs answer database questions on the chat model by default (empty `database_ask` allowlist), native model eviction/swap (`keep_alive=0`), Ollama-compat `/api/version` pre-auth + `/api/tags` for scoped keys, `SUM(INT)`→`BIGINT`, and Learning Loop console fixes. Seamless upgrade from v2.3.x |
 | [**v2.3.3-ce**](v2.3.3-ce.md) | 2026-10-26 | Calendar date math you can trust — `INTERVAL` `YEAR`/`MONTH` do true leap-aware, month-end-clamped arithmetic (previously every interval collapsed to an approximate integer number of days, and a `YEAR`/`MONTH` suffix was ignored), fixed-duration units keep sub-day precision, and `CAST(... AS DATE)` is strictly validated; `SQRT`/`POWER` propagate `NULL` and accept exact `DECIMAL`, and `FALSE AND` / `TRUE OR` short-circuit; reads over third-party Parquet reconcile nullability and union additive columns to typed `NULL`s; plus two engine-stability fixes (empty-body CTE schema, deep join/aggregate/CTE worker-stack) caught by validating the release artifact. 177/187 recipe certification with zero regressions vs v2.3.2; seamless upgrade from v2.3.x |
 | [**v2.3.2-ce**](v2.3.2-ce.md) | 2026-10-24 | Agent RBAC — database-scoped agent privileges (`AGENT MONITOR`/`OPERATE`/`APPROVE`/`CONFIGURE`), roles and role-bound expiring API keys, database ownership and a per-decision audit receipt — paired with a 47-finding correctness pass and the full RBAC console (Learning Loop, roles & grants). Public debut of the DAVINCI line on `:latest` |

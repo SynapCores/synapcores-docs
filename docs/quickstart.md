@@ -36,7 +36,7 @@ curl -fsSL https://get.synapcores.com | SYNAPCORES_BINARY_ONLY=1 sh
 To pin a specific release:
 
 ```bash
-curl -fsSL https://get.synapcores.com | SYNAPCORES_VERSION=v1.0.0 sh
+curl -fsSL https://get.synapcores.com | SYNAPCORES_VERSION=v2.5.0-ce sh
 ```
 
 ## First run
@@ -79,7 +79,7 @@ curl -fsSL https://get.synapcores.com | SYNAPCORES_VERSION=v1.0.0 sh
    The first line you'll see is the edition banner:
 
    ```
-   Starting SynapCores Community edition (v0.1.0, build 275, git ...)
+   Starting SynapCores Community edition (v0.1.0, build 575, git ...)
    License loaded: id=lic_community_default tier=Community edition=Community customer=(none)
    ```
 
@@ -87,7 +87,7 @@ curl -fsSL https://get.synapcores.com | SYNAPCORES_VERSION=v1.0.0 sh
 
    ```bash
    /opt/synapcores/synapcores --version
-   # synapcores 0.1.0 Community (build 275, abc1234)
+   # synapcores 0.1.0 Community (build 575, abc1234)
    ```
 
 6. **Capture the first-boot admin password.** It's printed exactly
