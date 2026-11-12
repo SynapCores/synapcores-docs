@@ -46,19 +46,72 @@ The spec is the source of truth, but the routes most integrations need are:
 | List tables | `/v1/schema/tables` | `GET` |
 | Vector search | `/v1/vectors/collections/{name}/search` | `POST` |
 | AutoML predict | `/v1/automl/models/{id}/predict` | `POST` |
+| AI chat | `/v1/ai/chat` | `POST` |
+| AI chat (streaming, SSE) | `/v1/ai/chat/stream` | `POST` |
+| **One-call decision (d1)** | `/v1/systemone` | `POST` |
+| NL → SQL | `/v1/nl2sql/query` | `POST` |
+| Graph (Cypher) | `/v1/graph/match` | `POST` |
+| Native vision (describe image) | `/v1/multimodal/describe` | `POST` |
 | MCP (JSON-RPC) | `/v1/mcp` | `POST` |
+| MCP info | `/v1/mcp/info` | `GET` |
 | NLI verify (claim vs anchors) | `/v1/ai/nli/verify` | `POST` |
 | NLI pair scores | `/v1/ai/nli/pairs` | `POST` |
 | NLI model state | `/v1/ai/nli/models` | `GET` |
 
-The NLI endpoints have a dedicated manual with every request/response shape and error code: [NLI — claim verification](nli.md).
-| MCP info | `/v1/mcp/info` | `GET` |
+Two of these have a dedicated manual with every request/response shape and error code:
+[**decisions** — the d1 decision endpoint](decisions.md) and
+[**NLI** — claim verification](nli.md).
 
 > **Two paths that 404 because they don't exist.** If you've seen these, you're
 > looking for one of the routes above:
 >
 > - `POST /v1/query` — there is no bare query route; use `/v1/query/execute`.
 > - `POST /api/v1/<anything>` — the API is mounted at `/v1/`, not `/api/v1/`.
+
+## Decision endpoint (`/v1/systemone`)
+
+New in **v2.5.0-ce**: a single call that returns a **typed decision** — a routing choice
+with per-option probabilities, a yes/no probability, or an urgency score — in one forward
+pass, **zero generated tokens**. Backed by the **d1** decision model (pull it once with
+`synapcores pull d1:latest`). Full guide, field-by-field: [**Decision model (d1)**](decisions.md).
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/v1/systemone \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "d1:latest",
+    "state": "You charged my card twice and still have not shipped my order. I need this TODAY.",
+    "questions": {
+      "route":   { "type": "choice", "instructions": "Which team should handle this?",
+                   "criteria": { "billing": "payments/refunds", "shipping": "delivery", "technical": "bugs" } },
+      "angry":   { "type": "noul",   "instructions": "Is the customer angry?" },
+      "urgency": { "type": "score",  "instructions": "How urgent?",
+                   "criteria": ["can wait", "this week", "today", "right now"] }
+    }
+  }'
+```
+
+```json
+{
+  "model": "d1:latest",
+  "answers": {
+    "route":   { "type": "choice", "choice": "billing",
+                 "probabilities": { "billing": 0.926, "shipping": 0.062, "technical": 0.012 },
+                 "confidence": 0.926 },
+    "angry":   { "type": "noul", "noul": 0.775 },
+    "urgency": { "type": "score", "score": 2.20,
+                 "legend": { "0": "can wait", "1": "this week", "2": "today", "3": "right now" },
+                 "probabilities": { "0": 0.001, "1": 0.001, "2": 0.792, "3": 0.206 },
+                 "confidence": 0.792 }
+  },
+  "usage": { "input_tokens": 188, "output_tokens": 0 }
+}
+```
+
+Always include `"model": "d1:latest"` in the body — it routes the call to the calibrated
+decision model instead of your text-generation model. The endpoint also accepts any other
+causal model you've pulled, though d1 is the calibrated, recommended choice.
 
 ## Generating a client
 
