@@ -1366,6 +1366,85 @@ Higher-level helpers used inside `SEMANTIC JOIN` and multi-modal queries. Prefer
 
 `CLASSIFY(text, categories)`, `EXTRACT_ENTITIES(text)`, `SENTIMENT(text)`, `SUMMARIZE(text)`, `TRANSLATE(text, target_lang)`.
 
+### The `DECIDE` decision-model family — *v2.5.1-ce+*
+
+The SQL form of `POST /v1/systemone`: run the native decision model (d1 / System One) over
+some `state` and get a **typed decision** — a routing choice with per-option probabilities, a
+yes/no probability, or an urgency score — in a SINGLE forward pass with **zero output tokens**.
+All forms share one decoder and one validator with the REST endpoint. Model resolution is always
+`options.model` → `[query.ai_service].decision_model` → `d1:latest`; the decision model is
+NEVER the generation model. Requires native inference (`provider = "local"`).
+
+A `question` is a JSON object `{type, instructions, criteria?}`:
+
+- `type = 'choice'` — `criteria` is an object of `option -> description` (capped at 26 options).
+- `type = 'noul'` — yes/no; `criteria` is **optional and ignored** (parity with llama-server).
+- `type = 'score'` — `criteria` is an ordered array of 2..10 level labels, lowest first.
+
+#### `DECIDE(state, question_json [, options_json])` → JSON
+
+Returns the full answer object `{type, choice/noul/score, probabilities, confidence}` as JSON.
+
+```sql
+-- Structured choice
+SELECT DECIDE(body, json_object('type','choice','instructions','Which team?',
+  'criteria', json_object('billing','payments/refunds','shipping','delivery'))) AS answer
+FROM tickets WHERE id = 1;
+
+-- Yes/no as JSON
+SELECT DECIDE(review, json_object('type','noul','instructions','Is the customer angry?')) AS verdict
+FROM reviews LIMIT 10;
+```
+
+#### `DECIDE_CHOICE(state, instructions, criteria_obj [, options_json])` → TEXT
+
+The chosen option only (the headline value, no JSON parsing by the caller). `criteria_obj` is a
+`json_object(...)` of option → description, capped at 26. Slots into `WHERE`, `CREATE AGENT`
+conditions, or `ORDER BY` via an alias.
+
+```sql
+SELECT id, DECIDE_CHOICE(body, 'Which team should handle this?',
+  json_object('billing','payments/refunds','shipping','delivery','technical','bugs')) AS route
+FROM tickets WHERE status = 'open';
+```
+
+#### `DECIDE_YESNO(state, instructions [, options_json])` → DOUBLE
+
+`P(yes)` in `[0,1]` from one forward pass. Ideal for thresholding in `WHERE` or a `CREATE AGENT`
+condition (e.g. `P(fraud) > 0.8`).
+
+```sql
+SELECT id, DECIDE_YESNO(body, 'Is the customer angry?') AS angry_p
+FROM tickets ORDER BY angry_p DESC LIMIT 20;
+```
+
+#### `DECIDE_SCORE(state, instructions, levels_array [, options_json])` → DOUBLE
+
+The fractional (probability-weighted) expected level index (0-based). `levels_array` is an ordered
+JSON array of 2..10 labels, lowest first.
+
+```sql
+SELECT id, DECIDE_SCORE(body, 'How urgent?', '["can wait","this week","today","right now"]') AS urgency
+FROM tickets ORDER BY urgency DESC;
+```
+
+#### `SELECT ... FROM DECIDE_ALL(state, questions_obj [, options_json])` → table
+
+Table-valued, multi-question form (goes in `FROM`, like `MEMORY_RECALL`). `questions_obj` is a
+`json_object(...)` of `name -> {type, instructions, criteria?}` mixing choice/noul/score; all are
+answered in one batched set of passes over a resident model (the state prefix is rendered once).
+Columns: `question TEXT, answer_type TEXT, answer JSON, confidence DOUBLE`.
+
+```sql
+SELECT question, answer_type, confidence, answer
+FROM DECIDE_ALL('Customer charged twice, no shipment, wants it TODAY',
+  json_object(
+    'route', json_object('type','choice','instructions','Which team?',
+      'criteria', json_object('billing','payments','shipping','delivery')),
+    'angry', json_object('type','noul','instructions','Is the customer angry?')));
+```
+
+
 ### `TRANSCRIBE(path [, language])` — *Enterprise only*
 
 ```sql
